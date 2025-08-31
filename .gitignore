@@ -1,0 +1,8 @@
+# compilation and distribution
+__pycache__
+SparseConvNet/
+data/
+output/
+teaser.png
+# Pycharm editor settings
+.idea
