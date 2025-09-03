@@ -1,7 +1,7 @@
 # compilation and distribution
 __pycache__
 SparseConvNet/
-data/
+/data/
 output/
 teaser.png
 # Pycharm editor settings
