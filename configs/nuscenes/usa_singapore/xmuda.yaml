@@ -1,34 +1,41 @@
 MODEL_2D:
   TYPE: "UNetResNet34"
   DUAL_HEAD: True
+
 MODEL_3D:
   TYPE: "SCN"
   DUAL_HEAD: True
+
 DATASET_SOURCE:
   TYPE: "NuScenesSCN"
   TRAIN: ("train_usa",)
   NuScenesSCN:
-    preprocess_dir: "/home/Hash-Lee/paper3/xMUDA/data/preprocess"
-    nuscenes_dir: "/home/Hash-Lee/paper3/xMUDA/data/nuscenes"  # only front cam images are needed
+    preprocess_dir: "/home/Hash-Lee/paper3/3D_Openset_UDA/data/preprocess"
+    nuscenes_dir: "/home/Hash-Lee/paper3/3D_Openset_UDA/data/nuscenes"  # only front cam images are needed
+
 DATASET_TARGET:
   TYPE: "NuScenesSCN"
   TRAIN: ("train_singapore",)
   VAL: ("val_singapore",)
   TEST: ("test_singapore",)
   NuScenesSCN:
-    preprocess_dir: "/home/Hash-Lee/paper3/xMUDA/data/preprocess"
-    nuscenes_dir: "/home/Hash-Lee/paper3/xMUDA/data/nuscenes"  # only front cam images are needed
+    preprocess_dir: "/home/Hash-Lee/paper3/3D_Openset_UDA/data/preprocess"
+    nuscenes_dir: "/home/Hash-Lee/paper3/3D_Openset_UDA/data/nuscenes"  # only front cam images are needed
+
 DATALOADER:
   NUM_WORKERS: 4
+
 OPTIMIZER:
   TYPE: "Adam"
   BASE_LR: 0.001
+
 SCHEDULER:
   TYPE: "MultiStepLR"
   MultiStepLR:
     gamma: 0.1
     milestones: (80000, 90000)
   MAX_ITERATION: 100000
+
 TRAIN:
   BATCH_SIZE: 8
   SUMMARY_PERIOD: 50
@@ -37,7 +44,20 @@ TRAIN:
   XMUDA:
     lambda_xm_src: 1.0
     lambda_xm_trg: 0.1
+
+OPENSET:
+  ENABLE: true                               # 打开 open-set 逻辑（关掉=完全回归原版）
+  UNKNOWN_CLASSES: ["bus", "construction_vehicle"]  # OS-A：在源域训练映射为 ignore；target 评估用来生成 unk_gt
+  UNK_SCORE: {alpha: 1.0, beta: 1.0, gamma: 1.0}    # U = α·H2D + β·H3D + γ·JS；先等权
+  THRESHOLD: {type: quantile, q: 0.80}       # 批内分位阈值；unk_ratio 若过高/过低，可调 0.7/0.9
+  GATE_XM: true                               # 仅对“候选已知”做跨模态 KL
+  GATE_PL: true                               # 仅对“候选已知”做伪标签 CE；未知置 ignore
+  GATE_MINENT: false                          # 先关；A-lite 跑稳后再考虑对未知做高熵正则
+  WARMUP_ITERS: 1000                           # 前若干 iter 只统计不使用（可选，稳一点）
+  LOG_HIST_EVERY: 500                          # 日志直方图/百分位的打印频率
+
 VAL:
   BATCH_SIZE: 32
   PERIOD: 5000
-OUTPUT_DIR: "/home/Hash-Lee/paper3/xMUDA/output/@"  #  @ will be replaced with config path, e.g. nuscenes/usa_singapore/xmuda
+
+OUTPUT_DIR: "/home/Hash-Lee/paper3/3D_Openset_UDA/output/@"  #  @ will be replaced with config path, e.g. nuscenes/usa_singapore/xmuda

@@ -6,3 +6,5 @@ output/
 teaser.png
 # Pycharm editor settings
 .idea
+.vscode/
+analysis/
