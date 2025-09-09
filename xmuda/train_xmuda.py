@@ -200,15 +200,25 @@ def train(cfg, output_dir='', run_name=''):
         loss_3d = seg_loss_src_3d
 
         if cfg.TRAIN.XMUDA.lambda_xm_src > 0:
+            # Only perform KL on non-100 points
+            with torch.no_grad():
+                valid_src = (data_batch_src['seg_label'] != -100)  # (N,)
+
             # cross-modal loss: KL divergence
             seg_logit_2d = preds_2d['seg_logit2'] if cfg.MODEL_2D.DUAL_HEAD else preds_2d['seg_logit']
             seg_logit_3d = preds_3d['seg_logit2'] if cfg.MODEL_3D.DUAL_HEAD else preds_3d['seg_logit']
-            xm_loss_src_2d = F.kl_div(F.log_softmax(seg_logit_2d, dim=1),
-                                      F.softmax(preds_3d['seg_logit'].detach(), dim=1),
-                                      reduction='none').sum(1).mean()
-            xm_loss_src_3d = F.kl_div(F.log_softmax(seg_logit_3d, dim=1),
-                                      F.softmax(preds_2d['seg_logit'].detach(), dim=1),
-                                      reduction='none').sum(1).mean()
+            kl2d = F.kl_div(F.log_softmax(seg_logit_2d, dim=1),
+                            F.softmax(preds_3d['seg_logit'].detach(), dim=1),
+                            reduction='none').sum(1)
+            kl3d = F.kl_div(F.log_softmax(seg_logit_3d, dim=1), 
+                            F.softmax(preds_2d['seg_logit'].detach(), dim=1),
+                            reduction='none').sum(1)
+
+            # Only average to valid_src
+            denom = valid_src.float().sum().clamp_min(1.)
+            xm_loss_src_2d = (kl2d * valid_src.float()).sum() / denom
+            xm_loss_src_3d = (kl3d * valid_src.float()).sum() / denom
+
             train_metric_logger.update(xm_loss_src_2d=xm_loss_src_2d,
                                        xm_loss_src_3d=xm_loss_src_3d)
             loss_2d += cfg.TRAIN.XMUDA.lambda_xm_src * xm_loss_src_2d
@@ -232,32 +242,101 @@ def train(cfg, output_dir='', run_name=''):
 
         loss_2d = []
         loss_3d = []
+
+        # ==== A-lite: Point by point unknown degree U and obtain candidate known/unknown masks ====
+        if 'OPENSET' in cfg and cfg.OPENSET.ENABLE:
+            with torch.no_grad():
+                P2D = torch.softmax(preds_2d['seg_logit'], dim=1)  # (N,C)
+                P3D = torch.softmax(preds_3d['seg_logit'], dim=1)  # (N,C)
+
+                def entropy(P, eps=1e-8):
+                    return -(P * (P.add(eps).log())).sum(1)        # (N,)
+
+                def kl(P, Q, eps=1e-8):
+                    return (P * (P.add(eps).log() - Q.add(eps).log())).sum(1)  # (N,)
+                
+                H2D = entropy(P2D)
+                H3D = entropy(P3D)
+                M   = 0.5 * (P2D + P3D)
+                JS  = 0.5 * kl(P2D, M) + 0.5 * kl(P3D, M)
+
+                # simple 0-1 normalization (batch-wise)
+                def norm01(x, eps=1e-6):
+                    return (x - x.min()) / (x.max() - x.min() + eps)
+
+                a = cfg.OPENSET.UNK_SCORE.alpha
+                b = cfg.OPENSET.UNK_SCORE.beta
+                c = cfg.OPENSET.UNK_SCORE.gamma
+                U = a * norm01(H2D) + b * norm01(H3D) + c * norm01(JS)   # (N,)
+
+                q   = cfg.OPENSET.THRESHOLD.q
+                tau = torch.quantile(U.detach(), q)
+                mask_kn  = (U <= tau)          # candidate known
+                mask_unk = ~mask_kn            # candidate unknown
+
+            # Warmup: only statistics without gate
+            use_gate = (iteration >= cfg.OPENSET.WARMUP_ITERS)
+
+            if iteration % cfg.OPENSET.LOG_HIST_EVERY == 0:
+                train_metric_logger.update(unk_ratio=mask_unk.float().mean().item(),unk_tau=tau.item())
+            
+        else:
+            # Non Open set: All considered known
+            mask_kn  = torch.ones_like(preds_2d['seg_logit'][..., 0], dtype=torch.bool)
+            mask_unk = ~mask_kn
+            use_gate = False
+
         if cfg.TRAIN.XMUDA.lambda_xm_trg > 0:
             # cross-modal loss: KL divergence
             seg_logit_2d = preds_2d['seg_logit2'] if cfg.MODEL_2D.DUAL_HEAD else preds_2d['seg_logit']
             seg_logit_3d = preds_3d['seg_logit2'] if cfg.MODEL_3D.DUAL_HEAD else preds_3d['seg_logit']
-            xm_loss_trg_2d = F.kl_div(F.log_softmax(seg_logit_2d, dim=1),
-                                      F.softmax(preds_3d['seg_logit'].detach(), dim=1),
-                                      reduction='none').sum(1).mean()
-            xm_loss_trg_3d = F.kl_div(F.log_softmax(seg_logit_3d, dim=1),
-                                      F.softmax(preds_2d['seg_logit'].detach(), dim=1),
-                                      reduction='none').sum(1).mean()
+
+            kl2d = F.kl_div(F.log_softmax(seg_logit_2d, dim=1),
+                    P3D.detach(), reduction='none').sum(1)
+            kl3d = F.kl_div(F.log_softmax(seg_logit_3d, dim=1),
+                    P2D.detach(), reduction='none').sum(1)
+            if cfg.OPENSET.ENABLE and cfg.OPENSET.GATE_XM and use_gate:
+                denom = mask_kn.float().sum().clamp_min(1.)
+                xm_loss_trg_2d = (kl2d * mask_kn.float()).sum() / denom
+                xm_loss_trg_3d = (kl3d * mask_kn.float()).sum() / denom
+            else:
+                xm_loss_trg_2d = kl2d.mean()
+                xm_loss_trg_3d = kl3d.mean()
             train_metric_logger.update(xm_loss_trg_2d=xm_loss_trg_2d,
                                        xm_loss_trg_3d=xm_loss_trg_3d)
             loss_2d.append(cfg.TRAIN.XMUDA.lambda_xm_trg * xm_loss_trg_2d)
             loss_3d.append(cfg.TRAIN.XMUDA.lambda_xm_trg * xm_loss_trg_3d)
+
         if cfg.TRAIN.XMUDA.lambda_pl > 0:
+            ignore = -100
             # uni-modal self-training loss with pseudo labels
-            pl_loss_trg_2d = F.cross_entropy(preds_2d['seg_logit'], data_batch_trg['pseudo_label_2d'])
-            pl_loss_trg_3d = F.cross_entropy(preds_3d['seg_logit'], data_batch_trg['pseudo_label_3d'])
+            if ('OPENSET' in cfg and cfg.OPENSET.ENABLE and cfg.OPENSET.GATE_PL and use_gate):
+                pl2d = data_batch_trg['pseudo_label_2d'].clone()
+                pl3d = data_batch_trg['pseudo_label_3d'].clone()
+                pl2d[mask_unk] = ignore
+                pl3d[mask_unk] = ignore
+            else:
+                pl2d = data_batch_trg['pseudo_label_2d']
+                pl3d = data_batch_trg['pseudo_label_3d']
+
+            pl_loss_trg_2d = F.cross_entropy(preds_2d['seg_logit'], pl2d, ignore_index=ignore)
+            pl_loss_trg_3d = F.cross_entropy(preds_3d['seg_logit'], pl3d, ignore_index=ignore)
             train_metric_logger.update(pl_loss_trg_2d=pl_loss_trg_2d,
                                        pl_loss_trg_3d=pl_loss_trg_3d)
             loss_2d.append(cfg.TRAIN.XMUDA.lambda_pl * pl_loss_trg_2d)
             loss_3d.append(cfg.TRAIN.XMUDA.lambda_pl * pl_loss_trg_3d)
+
         if cfg.TRAIN.XMUDA.lambda_minent > 0:
             # MinEnt
-            minent_loss_trg_2d = entropy_loss(F.softmax(preds_2d['seg_logit'], dim=1))
-            minent_loss_trg_3d = entropy_loss(F.softmax(preds_3d['seg_logit'], dim=1))
+            if ('OPENSET' in cfg and cfg.OPENSET.ENABLE and cfg.OPENSET.GATE_MINENT and use_gate):
+                ent2d = -(P2D * (P2D.add(1e-8).log())).sum(1)
+                ent3d = -(P3D * (P3D.add(1e-8).log())).sum(1)
+                minent_loss_trg_2d = ent2d[mask_unk].mean()
+                minent_loss_trg_3d = ent3d[mask_unk].mean()
+            else:
+                minent_loss_trg_2d = entropy_loss(F.softmax(preds_2d['seg_logit'], dim=1))
+                minent_loss_trg_3d = entropy_loss(F.softmax(preds_3d['seg_logit'], dim=1))
+
             train_metric_logger.update(minent_loss_trg_2d=minent_loss_trg_2d,
                                        minent_loss_trg_3d=minent_loss_trg_3d)
             loss_2d.append(cfg.TRAIN.XMUDA.lambda_minent * minent_loss_trg_2d)

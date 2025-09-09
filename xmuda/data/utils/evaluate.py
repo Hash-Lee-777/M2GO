@@ -15,14 +15,14 @@ class Evaluator(object):
         Args:
             pred_label (np.ndarray): (num_points)
             gt_label (np.ndarray): (num_points,)
-
         """
+        
+        gt = np.array(gt_label, copy=True)
+        pr = np.array(pred_label, copy=False)
+
         # convert ignore_label to num_classes
-        # refer to sklearn.metrics.confusion_matrix
-        gt_label[gt_label == -100] = self.num_classes
-        confusion_matrix = CM(gt_label.flatten(),
-                              pred_label.flatten(),
-                              labels=self.labels)
+        gt[gt == -100] = self.num_classes
+        confusion_matrix = CM(gt.flatten(), pr.flatten(), labels=self.labels)
         self.confusion_matrix += confusion_matrix
 
     def batch_update(self, pred_labels, gt_labels):
@@ -60,6 +60,44 @@ class Evaluator(object):
             iou_list.append(iou)
         return iou_list
 
+    # ===================== add: openset evaluation ======================
+    def _unknown_index(self, unknown_name='unknown', unknown_id=None):
+        """return the index of unknown class (default find the class named 'unknown'). return None if not found."""
+        if unknown_id is not None:
+            return unknown_id if 0 <= unknown_id < self.num_classes else None
+        try:
+            return self.class_names.index(unknown_name)
+        except ValueError:
+            return None
+
+    def openset_common_iou(self, unknown_name='unknown', unknown_id=None):
+        """known (common) mIoU: exclude unknown and then do nanmean."""
+        unk = self._unknown_index(unknown_name, unknown_id)
+        iou = np.array(self.class_iou, dtype=float)
+        if unk is not None:
+            known_mask = np.ones(self.num_classes, dtype=bool)
+            known_mask[unk] = False
+            vals = iou[known_mask]
+        else:
+            vals = iou  # if no unknown, then fall back to closed set mean
+        return float(np.nanmean(vals)) if vals.size > 0 else float('nan')
+
+    def openset_private_iou(self, unknown_name='unknown', unknown_id=None):
+        """unknown (private) IoU: if NaN, then treat as 0 (more intuitive for H-score)."""
+        unk = self._unknown_index(unknown_name, unknown_id)
+        if unk is None:
+            return float('nan')
+        val = float(self.class_iou[unk])
+        return 0.0 if np.isnan(val) else val
+
+    def openset_hscore(self, unknown_name='unknown', unknown_id=None, eps=1e-8):
+        """H-Score = 2 * (common_mIoU * private_IoU) / (common_mIoU + private_IoU + eps)"""
+        c = self.openset_common_iou(unknown_name, unknown_id)
+        p = self.openset_private_iou(unknown_name, unknown_id)
+        if np.isnan(c) or np.isnan(p):
+            return float('nan')
+        return float(2.0 * c * p / (c + p + eps))
+
     def print_table(self):
         from tabulate import tabulate
         header = ['Class', 'Accuracy', 'IOU', 'Total']
@@ -69,7 +107,7 @@ class Evaluator(object):
         for ind, class_name in enumerate(self.class_names):
             table.append([class_name,
                           seg_acc_per_class[ind] * 100,
-                          iou_per_class[ind] * 100,
+                          iou_per_class[ind] * 100 if not np.isnan(iou_per_class[ind]) else float('nan'),
                           int(self.confusion_matrix[ind].sum()),
                           ])
         return tabulate(table, headers=header, tablefmt='psql', floatfmt='.2f')
@@ -79,6 +117,5 @@ class Evaluator(object):
         header = ('overall acc', 'overall iou') + self.class_names
         table = [[self.overall_acc, self.overall_iou] + self.class_iou]
         with open(filename, 'w') as f:
-            # In order to unify format, remove all the alignments.
             f.write(tabulate(table, headers=header, tablefmt='tsv', floatfmt='.5f',
                              numalign=None, stralign=None))

@@ -40,24 +40,28 @@ TRAIN:
   BATCH_SIZE: 8
   SUMMARY_PERIOD: 50
   CHECKPOINT_PERIOD: 5000
-  CLASS_WEIGHTS: [2.47956584, 4.26788384, 5.71114131, 3.80241668, 1.]
+  CLASS_WEIGHTS: [2.57, 4.24, 5.69, 3.84, 1.]
   XMUDA:
     lambda_xm_src: 1.0
     lambda_xm_trg: 0.1
+    lambda_pl: 0.0        # do not use pseudo label, focus on pure UDA + Open-set
 
 OPENSET:
-  ENABLE: true                               # 打开 open-set 逻辑（关掉=完全回归原版）
-  UNKNOWN_CLASSES: ["bus", "construction_vehicle"]  # OS-A：在源域训练映射为 ignore；target 评估用来生成 unk_gt
-  UNK_SCORE: {alpha: 1.0, beta: 1.0, gamma: 1.0}    # U = α·H2D + β·H3D + γ·JS；先等权
-  THRESHOLD: {type: quantile, q: 0.80}       # 批内分位阈值；unk_ratio 若过高/过低，可调 0.7/0.9
-  GATE_XM: true                               # 仅对“候选已知”做跨模态 KL
-  GATE_PL: true                               # 仅对“候选已知”做伪标签 CE；未知置 ignore
-  GATE_MINENT: false                          # 先关；A-lite 跑稳后再考虑对未知做高熵正则
-  WARMUP_ITERS: 1000                           # 前若干 iter 只统计不使用（可选，稳一点）
-  LOG_HIST_EVERY: 500                          # 日志直方图/百分位的打印频率
+  ENABLE: true                              
+  UNKNOWN_CLASSES: ["bus", "construction_vehicle"]  
+  UNK_SCORE: {alpha: 1.0, beta: 1.0, gamma: 1.0}    
+  THRESHOLD: {type: quantile, q: 0.97}       
+  GATE_XM: true                               
+  GATE_PL: false                              
+  GATE_MINENT: false                         
+  WARMUP_ITERS: 1000                          
+  LOG_HIST_EVERY: 500                         
 
 VAL:
   BATCH_SIZE: 32
   PERIOD: 5000
+
+RESUME_PATH: ""
+AUTO_RESUME: False
 
 OUTPUT_DIR: "/home/Hash-Lee/paper3/3D_Openset_UDA/output/@"  #  @ will be replaced with config path, e.g. nuscenes/usa_singapore/xmuda

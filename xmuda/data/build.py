@@ -30,7 +30,7 @@ def build_dataloader(cfg, mode='train', domain='source', start_iteration=0, halv
 
     if 'OPENSET' in cfg and cfg.OPENSET.ENABLE:
         dataset_kwargs.openset = True
-        dataset_kwargs.unknown_classes = list(cfg.OPENSET.UNKNOWN_CLASSES)
+        dataset_kwargs.unknown_classes = list(cfg.OPENSET.UNKNOWN_CLASSES)    
     else:
         dataset_kwargs.openset = False
         dataset_kwargs.unknown_classes = []

@@ -22,6 +22,7 @@ def collate_scn_base(input_dict_list, output_orig, output_image=True):
     if output_orig:
         orig_seg_label = []
         orig_points_idx = []
+        orig_seg_label_fine = []  # add orig_seg_label_fine
 
     output_pselab = 'pseudo_label_2d' in input_dict_list[0].keys()
     if output_pselab:
@@ -41,6 +42,12 @@ def collate_scn_base(input_dict_list, output_orig, output_image=True):
         if output_orig:
             orig_seg_label.append(input_dict['orig_seg_label'])
             orig_points_idx.append(input_dict['orig_points_idx'])
+            # add orig_seg_label_fine
+            if 'orig_seg_label_fine' in input_dict:
+                orig_seg_label_fine.append(input_dict['orig_seg_label_fine'])
+            else:
+                # if no orig_seg_label_fine, use orig_seg_label as fallback
+                orig_seg_label_fine.append(input_dict['orig_seg_label'])
         if output_pselab:
             pseudo_label_2d.append(torch.from_numpy(input_dict['pseudo_label_2d']))
             if input_dict['pseudo_label_3d'] is not None:
@@ -58,6 +65,7 @@ def collate_scn_base(input_dict_list, output_orig, output_image=True):
     if output_orig:
         out_dict['orig_seg_label'] = orig_seg_label
         out_dict['orig_points_idx'] = orig_points_idx
+        out_dict['orig_seg_label_fine'] = orig_seg_label_fine  # add orig_seg_label_fine to output
     if output_pselab:
         out_dict['pseudo_label_2d'] = torch.cat(pseudo_label_2d, 0)
         out_dict['pseudo_label_3d'] = torch.cat(pseudo_label_3d, 0) if pseudo_label_3d else pseudo_label_3d

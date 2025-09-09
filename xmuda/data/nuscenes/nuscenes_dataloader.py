@@ -40,7 +40,8 @@ class NuScenesBase(Dataset):
                  preprocess_dir,
                  merge_classes=False,
                  pselab_paths=None,
-                 # === 新增：最小开关 ===
+                 output_orig=False,    # add output_orig parameter
+                 # === new open-set ===
                  openset=False,
                  domain=None,          # 'source' or 'target'
                  unknown_classes=None
@@ -48,8 +49,9 @@ class NuScenesBase(Dataset):
 
         self.split = split
         self.preprocess_dir = preprocess_dir
+        self.output_orig = output_orig  # set output_orig attribute
 
-        print("Initialize Nuscenes dataloader")
+        print(f"Initialize Nuscenes dataloader - split: {split}, output_orig: {output_orig}, openset: {openset}, domain: {domain}")
 
         assert isinstance(split, tuple)
         print('Load', split)
@@ -96,8 +98,12 @@ class NuScenesBase(Dataset):
                     self.pselab_data[data_idx]['pseudo_label_3d'] = None
                 left_idx = right_idx
 
-        fine_names = list(self.class_names)
-        self.fine_class_names = fine_names[:]   # ✅ 暴露 11 类顺序，给评估/自检用
+        
+        self.fine_class_names = [
+            "car","truck","bus","trailer","construction_vehicle",
+            "pedestrian","motorcycle","bicycle","traffic_cone","barrier","background"
+        ]
+        fine_names = self.fine_class_names  
         unknown_set = set(unknown_classes or [])
 
         if merge_classes:
@@ -105,13 +111,13 @@ class NuScenesBase(Dataset):
             for cat_idx, (cat_name, cat_list) in enumerate(self.categories.items()):
                 for cls in cat_list:
                     fid = fine_names.index(cls)
-                    # ✅ 严格 open-set：仅对「源域的 train」把 unknown 细类映射为 ignore
+                    # strict open-set: only map unknown classes to ignore in source-train
                     is_source_train = (domain == 'source') and any('train' in s for s in self.split)
                     if openset and is_source_train and (cls in unknown_set):
-                        # 保持 -100 = ignore_index（不并入 5 类）
+                        # keep -100 = ignore_index (not merged into 5 classes)
                         continue
                     self.label_mapping[fid] = cat_idx
-            self.class_names = list(self.categories.keys())  # 5 类名
+            self.class_names = list(self.categories.keys())  # 5 types of names
         else:
             self.label_mapping = None
 
@@ -149,13 +155,13 @@ class NuScenesSCN(NuScenesBase):
                          preprocess_dir,
                          merge_classes=merge_classes,
                          pselab_paths=pselab_paths,
+                         output_orig=output_orig,  
                          openset=openset,
                          domain=domain,
                          unknown_classes=unknown_classes)
 
         self.nuscenes_dir = nuscenes_dir
-        self.output_orig = output_orig
-
+        
         # point cloud parameters
         self.scale = scale
         self.full_scale = full_scale
@@ -179,10 +185,10 @@ class NuScenesSCN(NuScenesBase):
         data_dict = self.data[index]
 
         points = data_dict['points'].copy()
-        # ✅ 先保留一份 11 类“细类标签”
+        # keep one copy of 11 types of "fine" labels
         seg_label_fine = data_dict['seg_labels'].astype(np.int64)
 
-        # 再按需要做 11→5 的合并映射（或保持细类）
+        # then do the 11→5 mapping (or keep fine labels)
         seg_label = seg_label_fine
         if self.label_mapping is not None:
             seg_label = self.label_mapping[seg_label]
@@ -259,11 +265,13 @@ class NuScenesSCN(NuScenesBase):
             })
 
         if self.output_orig:
+            import torch
             out_dict.update({
-                'orig_seg_label': seg_label,
-                'orig_seg_label_fine': seg_label_fine,
-                'orig_points_idx': idxs,
+                'orig_seg_label': torch.from_numpy(seg_label).long(),
+                'orig_seg_label_fine': torch.from_numpy(seg_label_fine).long(),
+                'orig_points_idx': torch.from_numpy(idxs.astype(np.bool_)),   # back to numpy
             })
+
 
         return out_dict
 
@@ -276,16 +284,16 @@ def test_NuScenesSCN():
     preprocess_dir = '/home/Hash-Lee/paper3/3D_Openset_UDA/data/preprocess'
     nuscenes_dir = '/home/Hash-Lee/paper3/3D_Openset_UDA/data/nuscenes'
 
-    # 你选择的 unknown 细类（OS-A）
+    # the unknown classes we selected (OS-A)
     unknown_classes = ['bus', 'construction_vehicle']
-    # 11个细类的顺序（和预处理一致）。若你的工程里已有常量，可直接import使用
+    # the order of 11 types of fine classes (consistent with preprocess)
     fine_class_names = [
         "car", "truck", "bus", "trailer", "construction_vehicle",
         "pedestrian", "motorcycle", "bicycle", "traffic_cone", "barrier",
         "background"
     ]
 
-    print('=== Sanity 1: Source-Train（应当“开洞”）===')
+    print('=== Sanity 1: Source-Train (should be "open-set")===')
     ds_src = NuScenesSCN(
         split=('train_usa',),
         preprocess_dir=preprocess_dir,
@@ -294,51 +302,51 @@ def test_NuScenesSCN():
         use_image=True,
         noisy_rot=0.1, flip_x=0.5, rot_z=2*np.pi, transl=True,
         fliplr=0.5, color_jitter=(0.4, 0.4, 0.4),
-        output_orig=True,               # << 必开：返回 fine 标签 + 进网点掩码
-        openset=True, domain='source',  # << 关键：源域train要开洞
+        output_orig=True,               # << must open: return fine labels + points mask
+        openset=True, domain='source',  # << key: source-train should be "open-set"
         unknown_classes=unknown_classes
     )
 
     fine_order_src = ds_src.fine_class_names
     unknown_ids = np.array([fine_order_src.index(n) for n in unknown_classes], dtype=np.int64)
     
-    # 随机抽几个样本检查“开洞效果”
+    # randomly sample some samples to check "open-set" effect
     for i in random.sample(range(0, len(ds_src)), k=30):
         data = ds_src[i]
         coords = data['coords']
-        seg_label_in = data['seg_label']                 # 进入网络后的映射标签（5类或-100）
-        fine_full = data['orig_seg_label_fine']          # 全量细类标签（11类）
-        idxs = data['orig_points_idx']                   # 哪些点进入了网络
-        fine_in = fine_full[idxs]                        # 与 seg_label_in 对齐的细类标签
+        seg_label_in = data['seg_label']                 # the mapped labels after network (5 classes or -100)
+        fine_full = data['orig_seg_label_fine']          # the full fine labels (11 types)
+        idxs = data['orig_points_idx']                   # which points entered the network
+        fine_in = fine_full[idxs]                        # the fine labels aligned with seg_label_in
 
-        mask_unk_fine = np.isin(fine_in, unknown_ids)    # 这些应该被“开洞”
-        # 断言：unknown 细类对应的映射标签必须全是 -100（ignore）
+        mask_unk_fine = np.isin(fine_in, unknown_ids)    # these should be "open-set"
+        # assert: the mapped labels of unknown fine classes must be -100 (ignore)
         if mask_unk_fine.any():
             assert np.all(seg_label_in[mask_unk_fine] == -100), \
-                "Source-Train: 未将 unknown 细类映射为 ignore(-100)！"
-        # 断言：非 unknown 的映射标签应落在 [0..4]
+                "Source-Train: the unknown fine classes should be mapped to ignore(-100)!"
+        # assert: the mapped labels of non-unknown fine classes should be in [0..4]
         if (~mask_unk_fine).any():
             assert np.all((seg_label_in[~mask_unk_fine] >= 0) & (seg_label_in[~mask_unk_fine] <= 4)), \
-                "Source-Train: 非 unknown 点出现非法标签！"
+                "Source-Train: the illegal labels appear on the non-unknown points!"
 
         unk_ratio = mask_unk_fine.mean() * 100.0
-        print(f'[SRC idx={i}] N={len(coords)}, unknown(应被ignore)占比={unk_ratio:.2f}%')
-        # 可视化（把 ignore 点作为背景/跳过绘制）
+        print(f'[SRC idx={i}] N={len(coords)}, unknown(should be ignored) ratio={unk_ratio:.2f}%')
+        # visualize (map ignore points to background/skip drawing)
         vis_lbl = seg_label_in.copy()
-        vis_lbl[vis_lbl == -100] = 4   # 可视化时把 ignore 映射到 background 颜色
+        vis_lbl[vis_lbl == -100] = 4   # when visualizing, map ignore to background color
         img = np.moveaxis(data['img'], 0, 2)
         draw_points_image_labels(img, data['img_indices'][idxs], vis_lbl, color_palette_type='NuScenes', point_size=3)
         draw_bird_eye_view(coords)
 
-    print('=== Sanity 2: Target-Val（不应开洞；但要能构造 unk_gt）===')
+    print('=== Sanity 2: Target-Val (should not be "open-set"; but should be able to construct unk_gt)===')
     ds_trg = NuScenesSCN(
         split=('val_singapore',),
         preprocess_dir=preprocess_dir,
         nuscenes_dir=nuscenes_dir,
         merge_classes=True,
         use_image=True,
-        output_orig=True,                # << 必开：构造 unk_gt 用
-        openset=True, domain='target',   # << 目标域不应“开洞”，只是保留信息
+        output_orig=True,                # << must open: construct unk_gt
+        openset=True, domain='target',   # << target domain should not be "open-set", just keep information
         unknown_classes=unknown_classes
     )
 
@@ -348,26 +356,27 @@ def test_NuScenesSCN():
     for i in random.sample(range(0, len(ds_trg)), k=3):
         data = ds_trg[i]
         coords = data['coords']
-        seg_label_in = data['seg_label']                 # 进入网络后的映射标签（应全在 [0..4]）
+        seg_label_in = data['seg_label']                 # the mapped labels after network (should be in [0..4])
         fine_full = data['orig_seg_label_fine']
         idxs = data['orig_points_idx']
         fine_in = fine_full[idxs]
 
-        # 断言：目标域映射后不应有 -100（不做开洞）
+        # assert: the mapped labels of target domain should not be -100 (not "open-set")
         assert np.all(seg_label_in != -100), \
-            "Target-Val: 不应出现 ignore(-100)，说明错误地对目标域做了开洞！"
+            "Target-Val: the ignore(-100) should not appear, indicating that the target domain is \"open-set\"!"
 
-        # 构造 unk_gt，用于 open-set 指标（AUROC/AUPR/FPR95等）
+
+        # construct unk_gt, used for open-set metrics (AUROC/AUPR/FPR95, etc.)
         unk_gt = np.isin(fine_in, unknown_ids)
         unk_ratio = unk_gt.mean() * 100.0
-        print(f'[TRG idx={i}] N={len(coords)}, unknown(用于评估)占比={unk_ratio:.2f}%')
+        print(f'[TRG idx={i}] N={len(coords)}, unknown(used for evaluation) ratio={unk_ratio:.2f}%')
 
-        # 可视化：正常画 5 类标签；也可以把 unk_gt 的点描边/高亮（此处略）
+        # visualize: normal draw 5 types of labels; also draw the points of unk_gt (here is omitted)
         img = np.moveaxis(data['img'], 0, 2)
         draw_points_image_labels(img, data['img_indices'][idxs], seg_label_in, color_palette_type='NuScenes', point_size=3)
         draw_bird_eye_view(coords)
 
-    print('✓ Open-set dataloader 自检通过：源域开洞生效、目标域可构造 unk_gt。')
+    print('✓ Open-set dataloader self-check passed: source domain "open-set" effect, target domain can construct unk_gt.')
 
 
 

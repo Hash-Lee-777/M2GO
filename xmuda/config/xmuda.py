@@ -138,6 +138,24 @@ _C.MODEL_3D.SCN.residual_blocks = False  # ResNet style basic blocks
 _C.MODEL_3D.SCN.full_scale = 4096
 _C.MODEL_3D.SCN.num_planes = 7
 
+# ----------------------------------------------------------------------------- #
+# Open-set options
+# ----------------------------------------------------------------------------- #
+_C.OPENSET = CN()
+_C.OPENSET.ENABLE = False
+_C.OPENSET.UNKNOWN_CLASSES = []
+_C.OPENSET.UNK_SCORE = CN()
+_C.OPENSET.UNK_SCORE.alpha = 1.0
+_C.OPENSET.UNK_SCORE.beta = 1.0
+_C.OPENSET.UNK_SCORE.gamma = 1.0
+_C.OPENSET.THRESHOLD = CN()
+_C.OPENSET.THRESHOLD.type = 'quantile'
+_C.OPENSET.THRESHOLD.q = 0.8
+_C.OPENSET.WARMUP_ITERS = 1000
+_C.OPENSET.LOG_HIST_EVERY = 500
+_C.OPENSET.GATE_XM = True
+_C.OPENSET.GATE_PL = False
+_C.OPENSET.GATE_MINENT = False
 # ---------------------------------------------------------------------------- #
 # Misc options
 # ---------------------------------------------------------------------------- #
