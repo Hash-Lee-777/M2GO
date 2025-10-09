@@ -1,11 +1,14 @@
 import numpy as np
 import logging
 import time
+import os
+import os.path as osp
 
 import torch
 import torch.nn.functional as F
 
 from xmuda.data.utils.evaluate import Evaluator
+from xmuda.data.utils.visualize import draw_points_image_labels, draw_points_image_depth
 
 
 def validate(cfg,
@@ -41,7 +44,7 @@ def validate(cfg,
             'union': torch.zeros(6, dtype=torch.long, device='cpu'),
         }
     unk_ratio_sum, n_points_sum = 0.0, 0
-    tau_ema = None  # Validation period quantile threshold EMA
+    tau_ema = None  # kept for backward-compat logs; not used for head-based prediction
 
     if openset_enabled:
         if hasattr(dataloader.dataset, 'fine_class_names'):
@@ -54,23 +57,17 @@ def validate(cfg,
         
         unknown_ids = set([fine_order.index(n) for n in cfg.OPENSET.UNKNOWN_CLASSES])
 
-        # Validation period threshold strategy: prioritize fixed τ, otherwise use quantile EMA
-        use_fixed_tau = hasattr(cfg.OPENSET, 'VAL_TAU') and (cfg.OPENSET.VAL_TAU is not None)
-        fixed_tau = float(cfg.OPENSET.VAL_TAU) if use_fixed_tau else None
-        q_val = getattr(cfg.OPENSET, 'VAL_Q', getattr(getattr(cfg.OPENSET, 'THRESHOLD', None), 'q', 0.80))
-
-        def robust_norm01(x, eps=1e-6):
-            # P10-P90 robust scaling, anti-outliers
-            p10 = torch.quantile(x, 0.10)
-            p90 = torch.quantile(x, 0.90)
-            x = (x - p10) / (p90 - p10 + eps)
-            return torch.clamp(x, 0.0, 1.0)
-
         def hmean(a, b, eps=1e-8):
             return (2 * a * b) / (a + b + eps)
 
+        # Head-expansion unknown threshold (fixed)
+        head_unknown_thr = 0.2
+
 
     pselab_data_list = []
+    # diagnostics for head-expansion unknown prediction
+    diag_tot, diag_pu2d_over, diag_pu3d_over, diag_puf_over = 0, 0, 0, 0
+    diag_arg2d_unk, diag_arg3d_unk, diag_argf_unk = 0, 0, 0
 
     end = time.time()
     with torch.no_grad():
@@ -88,41 +85,23 @@ def validate(cfg,
             preds_2d = model_2d(data_batch)
             preds_3d = model_3d(data_batch) if model_3d else None
 
+            # 6-class argmax (includes Unknown)
             pred_label_voxel_2d = preds_2d['seg_logit'].argmax(1).cpu().numpy()
             pred_label_voxel_3d = preds_3d['seg_logit'].argmax(1).cpu().numpy() if model_3d else None
+
+            # Closed-set (5-class) argmax for standard evaluator: ignore Unknown logit
+            pred_label_voxel_2d_5 = preds_2d['seg_logit'][:, :5].argmax(1).cpu().numpy()
+            pred_label_voxel_3d_5 = preds_3d['seg_logit'][:, :5].argmax(1).cpu().numpy() if model_3d else None
 
             # softmax average (ensembling)
             probs_2d = F.softmax(preds_2d['seg_logit'], dim=1)
             probs_3d = F.softmax(preds_3d['seg_logit'], dim=1) if model_3d else None
             pred_label_voxel_ensemble = (probs_2d + probs_3d).argmax(1).cpu().numpy() if model_3d else None
+            # Closed-set (5-class) for ensemble as well
+            pred_label_voxel_ensemble_5 = (probs_2d[:, :5] + probs_3d[:, :5]).argmax(1).cpu().numpy() if model_3d else None
 
-            # ===== Open-set: batch unknownness U and threshold =====
-            if openset_enabled and model_3d is not None:  # need 2D+3D
-                with torch.no_grad():
-                    def entropy(P, eps=1e-8):  # P (N,C)
-                        return -(P * (P.add(eps).log())).sum(1)
-
-                    def kl(P, Q, eps=1e-8):
-                        return (P * (P.add(eps).log() - Q.add(eps).log())).sum(1)
-
-                    H2D = entropy(probs_2d)
-                    H3D = entropy(probs_3d)
-                    M   = 0.5 * (probs_2d + probs_3d)
-                    JS  = 0.5 * kl(probs_2d, M) + 0.5 * kl(probs_3d, M)
-
-                    a = cfg.OPENSET.UNK_SCORE.alpha
-                    b = cfg.OPENSET.UNK_SCORE.beta
-                    c = cfg.OPENSET.UNK_SCORE.gamma
-                    U_all = a * robust_norm01(H2D) + b * robust_norm01(H3D) + c * robust_norm01(JS)  # (N,)
-
-                    if use_fixed_tau:
-                        tau = torch.tensor(fixed_tau, device=U_all.device, dtype=U_all.dtype)
-                    else:
-                        tau_b = torch.quantile(U_all.detach(), q_val)
-                        tau_ema = tau_b if (tau_ema is None) else (0.9 * tau_ema + 0.1 * tau_b)
-                        tau = tau_ema
-
-                    pred_unk_mask_all = (U_all > tau)  # (N,)
+            # Head-expansion evaluation: use C+1 head predictions for Unknown
+            # We keep probabilities for ensemble, but Unknown decision comes from argmax of 6-way heads
 
 
             # get original point cloud from before voxelization
@@ -140,20 +119,22 @@ def validate(cfg,
                 pred_label_2d = pred_label_voxel_2d[left_idx:right_idx]
                 pred_label_3d = pred_label_voxel_3d[left_idx:right_idx] if model_3d else None
                 pred_label_ensemble = pred_label_voxel_ensemble[left_idx:right_idx] if model_3d else None
-                
-                # ===== Open-set: single sample slice and accumulate 6 classes IoU =====
-                if openset_enabled and model_3d is not None:
-                    # current sample range
-                    mask_slice = pred_unk_mask_all[left_idx:right_idx].cpu().numpy()
 
+                # 5-class predictions for closed-set evaluation
+                pred_label_2d_5 = pred_label_voxel_2d_5[left_idx:right_idx]
+                pred_label_3d_5 = pred_label_voxel_3d_5[left_idx:right_idx] if model_3d else None
+                pred_label_ensemble_5 = pred_label_voxel_ensemble_5[left_idx:right_idx] if model_3d else None
+                
+            # ===== Open-set: single sample slice and accumulate 6 classes IoU =====
+                if openset_enabled:
                     # GT 6 classes: use fine labels to identify unknown; the rest use the mapped 5 classes
                     # Note: current validate has 'orig_seg_label' (5 classes) and 'orig_points_idx'.
                     # We use 'orig_seg_label_fine' (11 classes) to construct unknown GT.
-                    
+
                     # check data field availability (only first time)
                     if batch_ind == 0 and iteration == 0:
                         logger.info(f"[OpenSet] Validation enabled - orig_seg_label_fine: {'orig_seg_label_fine' in data_batch}")
-                    
+
                     if 'orig_seg_label_fine' in data_batch:
                         fine_full = data_batch['orig_seg_label_fine'][batch_ind].cpu().numpy()
                         pts_mask  = np.asarray(points_idx[batch_ind].cpu().numpy(), dtype=bool)
@@ -162,23 +143,32 @@ def validate(cfg,
                         is_unk_gt = np.isin(fine_in, list(unknown_ids))
                         y6[is_unk_gt] = 5  # Unknown class id = 5
                     else:
-                        # skip open-set accumulation if fine labels are missing
                         y6 = None
 
                     if y6 is not None:
-                        # three-path prediction: first 5 classes argmax, then cover Unknown with U
-                        yhat6_2d = pred_label_2d.copy()
-                        yhat6_2d[mask_slice] = 5
+                        # Head-expansion prediction: Unknown if p_unknown > thr; else choose best among first 5
+                        # 2D
+                        p_unk_2d = probs_2d[left_idx:right_idx, -1].detach().cpu().numpy()
+                        base5_2d = pred_label_voxel_2d_5[left_idx:right_idx].copy()
+                        yhat6_2d = base5_2d
+                        yhat6_2d[p_unk_2d > head_unknown_thr] = 5
 
-                        if pred_label_3d is not None:
-                            yhat6_3d = pred_label_3d.copy()
-                            yhat6_3d[mask_slice] = 5
+                        # 3D (if available)
+                        if model_3d:
+                            p_unk_3d = probs_3d[left_idx:right_idx, -1].detach().cpu().numpy()
+                            base5_3d = pred_label_voxel_3d_5[left_idx:right_idx].copy()
+                            yhat6_3d = base5_3d
+                            yhat6_3d[p_unk_3d > head_unknown_thr] = 5
                         else:
                             yhat6_3d = None
 
-                        if pred_label_ensemble is not None:
-                            yhat6_f = pred_label_ensemble.copy()
-                            yhat6_f[mask_slice] = 5
+                        # Fused (if available)
+                        if model_3d:
+                            pro_f = (probs_2d[left_idx:right_idx] + probs_3d[left_idx:right_idx]) / 2.0
+                            p_unk_f = pro_f[:, -1].detach().cpu().numpy()
+                            base5_f = pred_label_voxel_ensemble_5[left_idx:right_idx].copy()
+                            yhat6_f = base5_f
+                            yhat6_f[p_unk_f > head_unknown_thr] = 5
                         else:
                             yhat6_f = None
 
@@ -194,9 +184,22 @@ def validate(cfg,
                                 open_acc[m]['inter'][k] += inter
                                 open_acc[m]['union'][k] += union
 
-                        # A module effectiveness monitoring: unknown ratio
-                        unk_ratio_sum += float(mask_slice.mean()) * len(mask_slice)
-                        n_points_sum  += int(len(mask_slice))
+                        # Monitoring: predicted unknown ratio from fused (fallback to 2d)
+                        pred_ref = yhat6_f if yhat6_f is not None else yhat6_2d
+                        unk_ratio_sum += float((pred_ref == 5).mean()) * len(pred_ref)
+                        n_points_sum  += int(len(pred_ref))
+
+                        # diagnostics aggregation
+                        diag_tot += int(len(pred_ref))
+                        diag_pu2d_over += int((p_unk_2d > head_unknown_thr).sum())
+                        if model_3d:
+                            diag_pu3d_over += int((p_unk_3d > head_unknown_thr).sum())
+                            diag_puf_over  += int((p_unk_f > head_unknown_thr).sum())
+                        diag_arg2d_unk += int((yhat6_2d == 5).sum())
+                        if yhat6_3d is not None:
+                            diag_arg3d_unk += int((yhat6_3d == 5).sum())
+                        if yhat6_f is not None:
+                            diag_argf_unk  += int((yhat6_f == 5).sum())
 
                     # after build y6 / yhat6_2d / yhat6_3d / yhat6_f
                     if evaluator_os_2d is not None and y6 is not None:
@@ -208,10 +211,10 @@ def validate(cfg,
 
 
                 # evaluate
-                evaluator_2d.update(pred_label_2d, curr_seg_label)
+                evaluator_2d.update(pred_label_2d_5, curr_seg_label)
                 if model_3d:
-                    evaluator_3d.update(pred_label_3d, curr_seg_label)
-                    evaluator_ensemble.update(pred_label_ensemble, curr_seg_label)
+                    evaluator_3d.update(pred_label_3d_5, curr_seg_label)
+                    evaluator_ensemble.update(pred_label_ensemble_5, curr_seg_label)
 
                 if pselab_path is not None:
                     assert np.all(pred_label_2d >= 0)
@@ -224,7 +227,72 @@ def validate(cfg,
                         'pseudo_label_3d': pred_label_3d.astype(np.uint8) if model_3d else None
                     })
 
+                # keep current sample slice for optional visualization
+                slice_l, slice_r = left_idx, right_idx
                 left_idx = right_idx
+
+                # ---- minimal visualization (optional) ----
+                if getattr(cfg.VAL, 'SAVE_VIZ', False) and (iteration % int(cfg.VAL.VIZ_EVERY) == 0):
+                    # prepare image and indices for current slice
+                    img = data_batch['img'][batch_ind].detach().cpu().numpy()
+                    img = np.moveaxis(img, 0, 2)
+                    # img_indices is numpy; build boolean mask of points that entered network
+                    pts_mask_np = np.asarray(points_idx[batch_ind].cpu().numpy(), dtype=bool)
+                    img_idx = data_batch['img_indices'][batch_ind][pts_mask_np]
+                    # 2D 5-class overlay
+                    draw_points_image_labels(img.copy(), img_idx, pred_label_2d_5.copy(), show=False, color_palette_type='NuScenes', point_size=1.0)
+                    import matplotlib.pyplot as plt
+                    viz_dir = osp.join(osp.dirname(logger.handlers[0].baseFilename) if logger.handlers else '.', 'viz')
+                    os.makedirs(viz_dir, exist_ok=True)
+                    plt.savefig(osp.join(viz_dir, f'iter{iteration:06d}_b{batch_ind}_2d.png'), dpi=200); plt.close()
+                    # Unknown heat (fused p_unknown if available, else 2D)
+                    if model_3d:
+                        pro_f = (probs_2d[slice_l:slice_r] + probs_3d[slice_l:slice_r]) / 2.0
+                        p_unk_vis = pro_f[:, -1].detach().cpu().numpy()
+                    else:
+                        p_unk_vis = probs_2d[slice_l:slice_r, -1].detach().cpu().numpy()
+                    draw_points_image_depth(img.copy(), img_idx, p_unk_vis, show=False, point_size=1.0)
+                    plt.savefig(osp.join(viz_dir, f'iter{iteration:06d}_b{batch_ind}_punk.png'), dpi=200); plt.close()
+
+                    # Mismatch vs GT-Unknown overlap visualization
+                    try:
+                        import matplotlib.pyplot as plt
+                        # closed-set argmax (5-class) for this slice
+                        pred2d5_v = pred_label_voxel_2d_5[slice_l:slice_r]
+                        pred3d5_v = pred_label_voxel_3d_5[slice_l:slice_r] if model_3d else None
+                        if model_3d and pred3d5_v is not None:
+                            mismatch = (pred2d5_v != pred3d5_v)
+                        else:
+                            mismatch = np.zeros_like(pred2d5_v, dtype=bool)
+
+                        # GT unknown from fine labels
+                        if 'orig_seg_label_fine' in data_batch:
+                            fine_full = data_batch['orig_seg_label_fine'][batch_ind].cpu().numpy()
+                            gt_unk = np.isin(fine_full[pts_mask_np], list(unknown_ids))
+                        else:
+                            gt_unk = np.zeros_like(pred2d5_v, dtype=bool)
+
+                        overlap = mismatch & gt_unk
+                        mismatch_only = mismatch & (~gt_unk)
+                        gt_unk_only = gt_unk & (~mismatch)
+
+                        plt.imshow(img)
+                        # red: mismatch only
+                        pts = img_idx[mismatch_only]
+                        if len(pts) > 0:
+                            plt.scatter(pts[:,1], pts[:,0], c='#FF3B30', s=3, alpha=0.9, linewidths=0)
+                        # green: gt unknown only
+                        pts = img_idx[gt_unk_only]
+                        if len(pts) > 0:
+                            plt.scatter(pts[:,1], pts[:,0], c='#34C759', s=3, alpha=0.9, linewidths=0)
+                        # yellow: overlap
+                        pts = img_idx[overlap]
+                        if len(pts) > 0:
+                            plt.scatter(pts[:,1], pts[:,0], c='#FFCC00', s=4, alpha=0.95, linewidths=0)
+                        plt.axis('off')
+                        plt.savefig(osp.join(viz_dir, f'iter{iteration:06d}_b{batch_ind}_mis_unk.png'), dpi=200); plt.close()
+                    except Exception as e:
+                        logger.info(f"[VIZ] mismatch/gt_unk viz skipped: {e}")
 
             seg_loss_2d = F.cross_entropy(preds_2d['seg_logit'], data_batch['seg_label'])
             seg_loss_3d = F.cross_entropy(preds_3d['seg_logit'], data_batch['seg_label']) if model_3d else None
@@ -295,8 +363,7 @@ def validate(cfg,
 
             unk_ratio_avg = float(unk_ratio_sum / max(1, n_points_sum))
             val_metric_logger.update(open_unk_ratio=unk_ratio_avg)
-            if tau_ema is not None:
-                val_metric_logger.update(open_tau=float(tau_ema))
+            # tau_ema is not used for head-based prediction; keep omitted
             # --- Open-set tables (6 classes with Unknown) ---
             if evaluator_os_2d is not None:
                 logger.info('Open-Set 2D overall IOU={:.2f}'.format(100.0 * evaluator_os_2d.overall_iou))
@@ -321,7 +388,12 @@ def validate(cfg,
                             .format(res['3d'][0]*100, res['3d'][1]*100, res['3d'][2]*100))
                 logger.info('[OpenSet-2D+3D] Common mIoU={:.2f}  Private IoU={:.2f}  H-Score={:.2f}'
                             .format(res['fused'][0]*100, res['fused'][1]*100, res['fused'][2]*100))
-            logger.info('[OpenSet] unk_ratio={:.2f}%  tau={}'.format(
-                unk_ratio_avg*100.0,
-                ('fixed@{:.4f}'.format(fixed_tau) if use_fixed_tau else '{:.4f}'.format(float(tau_ema)))
-            ))
+            logger.info('[OpenSet] unk_ratio={:.2f}%'.format(unk_ratio_avg*100.0))
+            if diag_tot > 0:
+                logger.info('[Diag] p_unk>thr ratio - 2D:{:.2f}% 3D:{:.2f}% Fused:{:.2f}% | argmax Unknown ratio - 2D:{:.2f}% 3D:{:.2f}% Fused:{:.2f}%'.format(
+                    100.0*diag_pu2d_over/diag_tot,
+                    100.0*(diag_pu3d_over/diag_tot if model_3d else 0.0),
+                    100.0*(diag_puf_over/diag_tot if model_3d else 0.0),
+                    100.0*diag_arg2d_unk/diag_tot,
+                    100.0*(diag_arg3d_unk/diag_tot if model_3d else 0.0),
+                    100.0*(diag_argf_unk/diag_tot if model_3d else 0.0)))

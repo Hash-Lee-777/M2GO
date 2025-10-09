@@ -100,8 +100,8 @@ class DummyDataset(Dataset):
         if 'row' not in lidar_front_center.keys():
             print('row not in lidar dict, return None, {}'.format(data_dict['lidar_path']))
             return {}
-        rows = lidar_front_center['row'].astype(np.int)
-        cols = lidar_front_center['col'].astype(np.int)
+        rows = lidar_front_center['row'].astype(np.int64)
+        cols = lidar_front_center['col'].astype(np.int64)
 
         # extract 3D labels from 2D
         label_img = np.array(Image.open(data_dict['label_path']))

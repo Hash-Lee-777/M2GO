@@ -101,14 +101,14 @@ class SemanticKITTIBase(Dataset):
 
             # refine 2d pseudo labels
             probs2d = np.concatenate([data['probs_2d'] for data in self.pselab_data])
-            pseudo_label_2d = np.concatenate([data['pseudo_label_2d'] for data in self.pselab_data]).astype(np.int)
+            pseudo_label_2d = np.concatenate([data['pseudo_label_2d'] for data in self.pselab_data]).astype(np.int64)
             pseudo_label_2d = refine_pseudo_labels(probs2d, pseudo_label_2d)
 
             # refine 3d pseudo labels
             # fusion model has only one final prediction saved in probs_2d
             if 'probs_3d' in self.pselab_data[0].keys():
                 probs3d = np.concatenate([data['probs_3d'] for data in self.pselab_data])
-                pseudo_label_3d = np.concatenate([data['pseudo_label_3d'] for data in self.pselab_data]).astype(np.int)
+                pseudo_label_3d = np.concatenate([data['pseudo_label_3d'] for data in self.pselab_data]).astype(np.int64)
                 pseudo_label_3d = refine_pseudo_labels(probs3d, pseudo_label_3d)
             else:
                 pseudo_label_3d = None

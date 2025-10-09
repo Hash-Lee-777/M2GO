@@ -1,24 +1,26 @@
 MODEL_2D:
   TYPE: "UNetResNet34"
   DUAL_HEAD: True
+  NUM_CLASSES: 6
 MODEL_3D:
   TYPE: "SCN"
   DUAL_HEAD: True
+  NUM_CLASSES: 6
 DATASET_SOURCE:
   TYPE: "NuScenesSCN"
   TRAIN: ("train_usa",)
   NuScenesSCN:
-    preprocess_dir: "/datasets_local/datasets_mjaritz/nuscenes_preprocess/preprocess"
-    nuscenes_dir: "/datasets_local/datasets_mjaritz/nuscenes_preprocess"  # only front cam images are needed
+    preprocess_dir: "/home/Hash-Lee/paper3/3D_Openset_UDA/data/preprocess"
+    nuscenes_dir: "/home/Hash-Lee/paper3/3D_Openset_UDA/data/nuscenes"  # only front cam images are needed
 DATASET_TARGET:
   TYPE: "NuScenesSCN"
   TRAIN: ("train_singapore",)
   VAL: ("val_singapore",)
   TEST: ("test_singapore",)
   NuScenesSCN:
-    preprocess_dir: "/datasets_local/datasets_mjaritz/nuscenes_preprocess/preprocess"
-    nuscenes_dir: "/datasets_local/datasets_mjaritz/nuscenes_preprocess"  # only front cam images are needed
-    pselab_paths: ("/home/docker_user/workspace/outputs/xmuda/nuscenes/usa_singapore/xmuda/pselab_data/train_singapore.npy",)
+    preprocess_dir: "/home/Hash-Lee/paper3/3D_Openset_UDA/data/preprocess"
+    nuscenes_dir: "/home/Hash-Lee/paper3/3D_Openset_UDA/data/nuscenes"  # only front cam images are needed
+    pselab_paths: ("/home/Hash-Lee/paper3/3D_Openset_UDA/output/nuscenes/usa_singapore/xmuda/pselab_placeholder/train_singapore.npy",)
 DATALOADER:
   NUM_WORKERS: 4
 OPTIMIZER:
@@ -33,13 +35,26 @@ SCHEDULER:
 TRAIN:
   BATCH_SIZE: 8
   SUMMARY_PERIOD: 50
-  CHECKPOINT_PERIOD: 5000
-  CLASS_WEIGHTS: [2.47956584, 4.26788384, 5.71114131, 3.80241668, 1.]
+  CHECKPOINT_PERIOD: 10000
+  CLASS_WEIGHTS: [2.50, 4.23, 5.67, 3.82, 1.00, 1.00]
   XMUDA:
     lambda_xm_src: 1.0
     lambda_xm_trg: 0.1
-    lambda_pl: 1.0
+    lambda_pl: 0.1
 VAL:
   BATCH_SIZE: 32
   PERIOD: 5000
-#OUTPUT_DIR: "path/to/output/directory/@"  #  @ will be replaced with config path, e.g. nuscenes/usa_singapore/xmuda
+
+OPENSET:
+  ENABLE: true
+  UNKNOWN_CLASSES: ["bus", "construction_vehicle"]
+  UNK_SCORE: {alpha: 1.0, beta: 1.0, gamma: 1.0}
+  THRESHOLD: {type: quantile, q: 0.97}
+  GATE_XM: true
+  GATE_PL: true
+  GATE_MINENT: false
+  WARMUP_ITERS: 10000
+  LOG_HIST_EVERY: 500
+  LAMBDA_UNK: 0.00
+
+OUTPUT_DIR: "/home/Hash-Lee/paper3/3D_Openset_UDA/output/@"

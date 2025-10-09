@@ -75,14 +75,14 @@ class NuScenesBase(Dataset):
 
             # refine 2d pseudo labels
             probs2d = np.concatenate([data['probs_2d'] for data in self.pselab_data])
-            pseudo_label_2d = np.concatenate([data['pseudo_label_2d'] for data in self.pselab_data]).astype(np.int)
+            pseudo_label_2d = np.concatenate([data['pseudo_label_2d'] for data in self.pselab_data]).astype(np.int64)
             pseudo_label_2d = refine_pseudo_labels(probs2d, pseudo_label_2d)
 
             # refine 3d pseudo labels
             # fusion model has only one final prediction saved in probs_2d
             if 'probs_3d' in self.pselab_data[0].keys():
                 probs3d = np.concatenate([data['probs_3d'] for data in self.pselab_data])
-                pseudo_label_3d = np.concatenate([data['pseudo_label_3d'] for data in self.pselab_data]).astype(np.int)
+                pseudo_label_3d = np.concatenate([data['pseudo_label_3d'] for data in self.pselab_data]).astype(np.int64)
                 pseudo_label_3d = refine_pseudo_labels(probs3d, pseudo_label_3d)
             else:
                 pseudo_label_3d = None
@@ -263,6 +263,15 @@ class NuScenesSCN(NuScenesBase):
                 'pseudo_label_2d': self.pselab_data[index]['pseudo_label_2d'][keep_idx][idxs],
                 'pseudo_label_3d': self.pselab_data[index]['pseudo_label_3d'][keep_idx][idxs]
             })
+            # also export per-point confidence (max prob) for head-expansion training
+            if 'probs_2d' in self.pselab_data[index]:
+                out_dict['pseudo_conf_2d'] = self.pselab_data[index]['probs_2d'][keep_idx][idxs].astype(np.float32)
+            else:
+                out_dict['pseudo_conf_2d'] = None
+            if 'probs_3d' in self.pselab_data[index] and self.pselab_data[index]['probs_3d'] is not None:
+                out_dict['pseudo_conf_3d'] = self.pselab_data[index]['probs_3d'][keep_idx][idxs].astype(np.float32)
+            else:
+                out_dict['pseudo_conf_3d'] = None
 
         if self.output_orig:
             import torch

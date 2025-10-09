@@ -13,6 +13,13 @@ _C.VAL.METRIC = 'seg_iou'
 _C.TRAIN.CLASS_WEIGHTS = []
 
 # ---------------------------------------------------------------------------- #
+# Visualization options (validate/test)
+# ---------------------------------------------------------------------------- #
+_C.VAL.SAVE_VIZ = False
+_C.VAL.VIZ_EVERY = 10
+_C.VAL.VIZ_MAX = 50
+
+# ---------------------------------------------------------------------------- #
 # xMUDA options
 # ---------------------------------------------------------------------------- #
 _C.TRAIN.XMUDA = CN()
@@ -21,6 +28,18 @@ _C.TRAIN.XMUDA.lambda_xm_trg = 0.0
 _C.TRAIN.XMUDA.lambda_pl = 0.0
 _C.TRAIN.XMUDA.lambda_minent = 0.0
 _C.TRAIN.XMUDA.lambda_logcoral = 0.0
+
+# Head-expansion with pseudo labels: map low-confidence PL to Unknown
+_C.TRAIN.XMUDA.PL_TO_UNK = CN()
+_C.TRAIN.XMUDA.PL_TO_UNK.enable = False
+# use fixed threshold on max prob; if None, use quantile q
+_C.TRAIN.XMUDA.PL_TO_UNK.thr = None
+_C.TRAIN.XMUDA.PL_TO_UNK.q = 0.2
+# optional per-modality overrides (fallback to thr/q above when None)
+_C.TRAIN.XMUDA.PL_TO_UNK.thr2d = None
+_C.TRAIN.XMUDA.PL_TO_UNK.thr3d = None
+_C.TRAIN.XMUDA.PL_TO_UNK.q2d = None
+_C.TRAIN.XMUDA.PL_TO_UNK.q3d = None
 
 # ---------------------------------------------------------------------------- #
 # Datasets
@@ -151,6 +170,8 @@ _C.OPENSET.UNK_SCORE.gamma = 1.0
 _C.OPENSET.THRESHOLD = CN()
 _C.OPENSET.THRESHOLD.type = 'quantile'
 _C.OPENSET.THRESHOLD.q = 0.8
+_C.OPENSET.LAMBDA_UNK = 0.0
+_C.OPENSET.UNK_RAMP_ITERS = 0  # linear ramp steps after WARMUP_ITERS; 0=disabled (constant)
 _C.OPENSET.WARMUP_ITERS = 1000
 _C.OPENSET.LOG_HIST_EVERY = 500
 _C.OPENSET.GATE_XM = True

@@ -114,12 +114,15 @@ def main():
             warnings.warn('Make a new directory: {}'.format(output_dir))
             os.makedirs(output_dir)
 
-    # run name
+    # run name & per-run subdir (align with training)
     timestamp = time.strftime('%m-%d_%H-%M-%S')
     hostname = socket.gethostname()
     run_name = '{:s}.{:s}'.format(timestamp, hostname)
+    run_dir = osp.join(output_dir, 'test.{:s}'.format(run_name)) if output_dir else ''
+    if run_dir and not osp.isdir(run_dir):
+        os.makedirs(run_dir)
 
-    logger = setup_logger('xmuda', output_dir, comment='test.{:s}'.format(run_name))
+    logger = setup_logger('xmuda', run_dir or output_dir, comment='test.{:s}'.format(run_name))
     logger.info('{:d} GPUs available'.format(torch.cuda.device_count()))
     logger.info(args)
 
@@ -127,6 +130,9 @@ def main():
     logger.info('Running with config:\n{}'.format(cfg))
 
     assert cfg.MODEL_2D.DUAL_HEAD == cfg.MODEL_3D.DUAL_HEAD
+    # rewire save_dir for checkpointers and pselab under run_dir
+    if run_dir:
+        output_dir = run_dir
     test(cfg, args, output_dir)
 
 

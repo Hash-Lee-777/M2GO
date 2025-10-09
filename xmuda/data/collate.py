@@ -28,6 +28,8 @@ def collate_scn_base(input_dict_list, output_orig, output_image=True):
     if output_pselab:
         pseudo_label_2d = []
         pseudo_label_3d = []
+        pseudo_conf_2d = []
+        pseudo_conf_3d = []
 
     for idx, input_dict in enumerate(input_dict_list):
         coords = torch.from_numpy(input_dict['coords'])
@@ -52,6 +54,10 @@ def collate_scn_base(input_dict_list, output_orig, output_image=True):
             pseudo_label_2d.append(torch.from_numpy(input_dict['pseudo_label_2d']))
             if input_dict['pseudo_label_3d'] is not None:
                 pseudo_label_3d.append(torch.from_numpy(input_dict['pseudo_label_3d']))
+            if 'pseudo_conf_2d' in input_dict and input_dict['pseudo_conf_2d'] is not None:
+                pseudo_conf_2d.append(torch.from_numpy(input_dict['pseudo_conf_2d']))
+            if 'pseudo_conf_3d' in input_dict and input_dict['pseudo_conf_3d'] is not None:
+                pseudo_conf_3d.append(torch.from_numpy(input_dict['pseudo_conf_3d']))
 
     locs = torch.cat(locs, 0)
     feats = torch.cat(feats, 0)
@@ -69,6 +75,10 @@ def collate_scn_base(input_dict_list, output_orig, output_image=True):
     if output_pselab:
         out_dict['pseudo_label_2d'] = torch.cat(pseudo_label_2d, 0)
         out_dict['pseudo_label_3d'] = torch.cat(pseudo_label_3d, 0) if pseudo_label_3d else pseudo_label_3d
+        if pseudo_conf_2d:
+            out_dict['pseudo_conf_2d'] = torch.cat(pseudo_conf_2d, 0)
+        if pseudo_conf_3d:
+            out_dict['pseudo_conf_3d'] = torch.cat(pseudo_conf_3d, 0)
     return out_dict
 
 

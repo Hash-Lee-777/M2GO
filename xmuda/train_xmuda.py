@@ -108,6 +108,7 @@ def train(cfg, output_dir='', run_name=''):
     # build tensorboard logger (optionally by comment)
     if output_dir:
         tb_dir = osp.join(output_dir, 'tb.{:s}'.format(run_name))
+        os.makedirs(tb_dir, exist_ok=True)
         summary_writer = SummaryWriter(tb_dir)
     else:
         summary_writer = None
@@ -137,6 +138,8 @@ def train(cfg, output_dir='', run_name=''):
     # add metrics
     train_metric_logger = init_metric_logger([train_metric_2d, train_metric_3d])
     val_metric_logger = MetricLogger(delimiter='  ')
+    # Train-time EMA threshold for U (to match validation behavior)
+    tau_ema_train = None
 
     def setup_train():
         # set training mode
@@ -179,6 +182,11 @@ def train(cfg, output_dir='', run_name=''):
             if cfg.TRAIN.XMUDA.lambda_pl > 0:
                 data_batch_trg['pseudo_label_2d'] = data_batch_trg['pseudo_label_2d'].cuda()
                 data_batch_trg['pseudo_label_3d'] = data_batch_trg['pseudo_label_3d'].cuda()
+                # optional confidences for head-expansion with PL
+                if 'pseudo_conf_2d' in data_batch_trg and data_batch_trg['pseudo_conf_2d'] is not None:
+                    data_batch_trg['pseudo_conf_2d'] = data_batch_trg['pseudo_conf_2d'].cuda()
+                if 'pseudo_conf_3d' in data_batch_trg and data_batch_trg['pseudo_conf_3d'] is not None:
+                    data_batch_trg['pseudo_conf_3d'] = data_batch_trg['pseudo_conf_3d'].cuda()
         else:
             raise NotImplementedError('Only SCN is supported for now.')
 
@@ -243,11 +251,13 @@ def train(cfg, output_dir='', run_name=''):
         loss_2d = []
         loss_3d = []
 
+        # Always compute softmax for target branch to be used by KL/MinEnt, regardless of OPENSET
+        P2D = torch.softmax(preds_2d['seg_logit'], dim=1)  # (N,C)
+        P3D = torch.softmax(preds_3d['seg_logit'], dim=1)  # (N,C)
+
         # ==== A-lite: Point by point unknown degree U and obtain candidate known/unknown masks ====
         if 'OPENSET' in cfg and cfg.OPENSET.ENABLE:
             with torch.no_grad():
-                P2D = torch.softmax(preds_2d['seg_logit'], dim=1)  # (N,C)
-                P3D = torch.softmax(preds_3d['seg_logit'], dim=1)  # (N,C)
 
                 def entropy(P, eps=1e-8):
                     return -(P * (P.add(eps).log())).sum(1)        # (N,)
@@ -260,17 +270,22 @@ def train(cfg, output_dir='', run_name=''):
                 M   = 0.5 * (P2D + P3D)
                 JS  = 0.5 * kl(P2D, M) + 0.5 * kl(P3D, M)
 
-                # simple 0-1 normalization (batch-wise)
-                def norm01(x, eps=1e-6):
-                    return (x - x.min()) / (x.max() - x.min() + eps)
+                # robust 0-1 normalization (P10–P90)
+                def robust_norm01(x, eps=1e-6):
+                    p10 = torch.quantile(x, 0.10)
+                    p90 = torch.quantile(x, 0.90)
+                    x = (x - p10) / (p90 - p10 + eps)
+                    return torch.clamp(x, 0.0, 1.0)
 
                 a = cfg.OPENSET.UNK_SCORE.alpha
                 b = cfg.OPENSET.UNK_SCORE.beta
                 c = cfg.OPENSET.UNK_SCORE.gamma
-                U = a * norm01(H2D) + b * norm01(H3D) + c * norm01(JS)   # (N,)
+                U = a * robust_norm01(H2D) + b * robust_norm01(H3D) + c * robust_norm01(JS)   # (N,)
 
                 q   = cfg.OPENSET.THRESHOLD.q
-                tau = torch.quantile(U.detach(), q)
+                tau_b = torch.quantile(U.detach(), q)
+                tau_ema_train = tau_b if (tau_ema_train is None) else (0.9 * tau_ema_train + 0.1 * tau_b)
+                tau = tau_ema_train
                 mask_kn  = (U <= tau)          # candidate known
                 mask_unk = ~mask_kn            # candidate unknown
 
@@ -278,7 +293,7 @@ def train(cfg, output_dir='', run_name=''):
             use_gate = (iteration >= cfg.OPENSET.WARMUP_ITERS)
 
             if iteration % cfg.OPENSET.LOG_HIST_EVERY == 0:
-                train_metric_logger.update(unk_ratio=mask_unk.float().mean().item(),unk_tau=tau.item())
+                train_metric_logger.update(unk_ratio=mask_unk.float().mean().item(), unk_tau=float(tau))
             
         else:
             # Non Open set: All considered known
@@ -286,15 +301,55 @@ def train(cfg, output_dir='', run_name=''):
             mask_unk = ~mask_kn
             use_gate = False
 
+        # ===== Unknown supervised CE on target (C+1) =====
+        # Apply only after warmup and when enabled
+        if ('OPENSET' in cfg and cfg.OPENSET.ENABLE 
+            and use_gate):
+            # assume the last id is Unknown
+            unknown_id_2d = int(cfg.MODEL_2D.NUM_CLASSES) - 1
+            unknown_id_3d = int(cfg.MODEL_3D.NUM_CLASSES) - 1
+
+            def unknown_ce_loss(logits, mask, unknown_id):
+                if mask.any():
+                    num_pos = int(mask.long().sum().item())
+                    target = torch.full((num_pos,), unknown_id, device=logits.device, dtype=torch.long)
+                    return F.cross_entropy(logits[mask], target, weight=class_weights)
+                else:
+                    return torch.zeros((), device=logits.device)
+
+            # linear ramp for lambda_unk after warmup
+            lambda_unk_cfg = float(getattr(cfg.OPENSET, 'LAMBDA_UNK', 0.0))
+            ramp_steps = int(getattr(cfg.OPENSET, 'UNK_RAMP_ITERS', 0))
+            if lambda_unk_cfg > 0.0:
+                if iteration < cfg.OPENSET.WARMUP_ITERS:
+                    lambda_unk_eff = 0.0
+                elif ramp_steps > 0:
+                    t = (iteration - cfg.OPENSET.WARMUP_ITERS) / float(ramp_steps)
+                    lambda_unk_eff = lambda_unk_cfg * float(max(0.0, min(1.0, t)))
+                else:
+                    lambda_unk_eff = lambda_unk_cfg
+            else:
+                lambda_unk_eff = 0.0
+
+            if lambda_unk_eff > 0.0:
+                unk_ce_2d = unknown_ce_loss(preds_2d['seg_logit'], mask_unk, unknown_id_2d)
+                unk_ce_3d = unknown_ce_loss(preds_3d['seg_logit'], mask_unk, unknown_id_3d)
+                train_metric_logger.update(unk_ce_2d=unk_ce_2d, unk_ce_3d=unk_ce_3d, lambda_unk=lambda_unk_eff)
+                loss_2d.append(lambda_unk_eff * unk_ce_2d)
+                loss_3d.append(lambda_unk_eff * unk_ce_3d)
+
         if cfg.TRAIN.XMUDA.lambda_xm_trg > 0:
             # cross-modal loss: KL divergence
             seg_logit_2d = preds_2d['seg_logit2'] if cfg.MODEL_2D.DUAL_HEAD else preds_2d['seg_logit']
             seg_logit_3d = preds_3d['seg_logit2'] if cfg.MODEL_3D.DUAL_HEAD else preds_3d['seg_logit']
-
-            kl2d = F.kl_div(F.log_softmax(seg_logit_2d, dim=1),
-                    P3D.detach(), reduction='none').sum(1)
-            kl3d = F.kl_div(F.log_softmax(seg_logit_3d, dim=1),
-                    P2D.detach(), reduction='none').sum(1)
+            # limit KL to known classes only (exclude Unknown channel)
+            known_classes = int(cfg.MODEL_2D.NUM_CLASSES) - 1
+            P3D_known = P3D[:, :known_classes].detach()
+            P2D_known = P2D[:, :known_classes].detach()
+            kl2d = F.kl_div(F.log_softmax(seg_logit_2d[:, :known_classes], dim=1),
+                    P3D_known, reduction='none').sum(1)
+            kl3d = F.kl_div(F.log_softmax(seg_logit_3d[:, :known_classes], dim=1),
+                    P2D_known, reduction='none').sum(1)
             if cfg.OPENSET.ENABLE and cfg.OPENSET.GATE_XM and use_gate:
                 denom = mask_kn.float().sum().clamp_min(1.)
                 xm_loss_trg_2d = (kl2d * mask_kn.float()).sum() / denom
@@ -310,14 +365,103 @@ def train(cfg, output_dir='', run_name=''):
         if cfg.TRAIN.XMUDA.lambda_pl > 0:
             ignore = -100
             # uni-modal self-training loss with pseudo labels
+            pl2d = data_batch_trg['pseudo_label_2d'].clone()
+            pl3d = data_batch_trg['pseudo_label_3d'].clone()
+            # Head-expansion with PL: map low-confidence PL to Unknown (C)
+            if hasattr(cfg.TRAIN.XMUDA, 'PL_TO_UNK') and cfg.TRAIN.XMUDA.PL_TO_UNK.enable:
+                unknown_id_2d = int(cfg.MODEL_2D.NUM_CLASSES) - 1
+                unknown_id_3d = int(cfg.MODEL_3D.NUM_CLASSES) - 1
+                # thresholds for 2D
+                if 'pseudo_conf_2d' in data_batch_trg and data_batch_trg['pseudo_conf_2d'] is not None:
+                    conf2d = data_batch_trg['pseudo_conf_2d']
+                    # per-modality override: thr2d / q2d
+                    if getattr(cfg.TRAIN.XMUDA.PL_TO_UNK, 'thr2d', None) is not None:
+                        thr2d = float(cfg.TRAIN.XMUDA.PL_TO_UNK.thr2d)
+                    elif cfg.TRAIN.XMUDA.PL_TO_UNK.thr is not None:
+                        thr2d = float(cfg.TRAIN.XMUDA.PL_TO_UNK.thr)
+                    else:
+                        q2d = getattr(cfg.TRAIN.XMUDA.PL_TO_UNK, 'q2d', None)
+                        if q2d is not None:
+                            thr2d = torch.quantile(conf2d.detach(), float(q2d))
+                        elif cfg.TRAIN.XMUDA.PL_TO_UNK.q is not None:
+                            thr2d = torch.quantile(conf2d.detach(), float(cfg.TRAIN.XMUDA.PL_TO_UNK.q))
+                        else:
+                            # safe fallback when all quantiles are None
+                            thr2d = torch.quantile(conf2d.detach(), 0.2)
+                    low2d = (conf2d < thr2d)
+                    # Only re-label to Unknown where U is high (intersection with mask_unk)
+                    map2d = (low2d & mask_unk)
+                    pl2d[map2d] = unknown_id_2d
+                    # log ratio
+                    if map2d.numel() > 0:
+                        train_metric_logger.update(pl_low_ratio_2d=map2d.float().mean())
+                # thresholds for 3D (if available)
+                if 'pseudo_conf_3d' in data_batch_trg and data_batch_trg['pseudo_conf_3d'] is not None:
+                    conf3d = data_batch_trg['pseudo_conf_3d']
+                    # per-modality override: thr3d / q3d
+                    if getattr(cfg.TRAIN.XMUDA.PL_TO_UNK, 'thr3d', None) is not None:
+                        thr3d = float(cfg.TRAIN.XMUDA.PL_TO_UNK.thr3d)
+                    elif cfg.TRAIN.XMUDA.PL_TO_UNK.thr is not None:
+                        thr3d = float(cfg.TRAIN.XMUDA.PL_TO_UNK.thr)
+                    else:
+                        q3d = getattr(cfg.TRAIN.XMUDA.PL_TO_UNK, 'q3d', None)
+                        if q3d is not None:
+                            thr3d = torch.quantile(conf3d.detach(), float(q3d))
+                        elif cfg.TRAIN.XMUDA.PL_TO_UNK.q is not None:
+                            thr3d = torch.quantile(conf3d.detach(), float(cfg.TRAIN.XMUDA.PL_TO_UNK.q))
+                        else:
+                            # safe fallback when all quantiles are None
+                            thr3d = torch.quantile(conf3d.detach(), 0.2)
+                    low3d = (conf3d < thr3d)
+                    map3d = (low3d & mask_unk)
+                    pl3d[map3d] = unknown_id_3d
+                    if map3d.numel() > 0:
+                        train_metric_logger.update(pl_low_ratio_3d=map3d.float().mean())
+            # Gate PL: ignore only high-U points that are not already mapped to Unknown by low-conf
             if ('OPENSET' in cfg and cfg.OPENSET.ENABLE and cfg.OPENSET.GATE_PL and use_gate):
-                pl2d = data_batch_trg['pseudo_label_2d'].clone()
-                pl3d = data_batch_trg['pseudo_label_3d'].clone()
-                pl2d[mask_unk] = ignore
-                pl3d[mask_unk] = ignore
-            else:
-                pl2d = data_batch_trg['pseudo_label_2d']
-                pl3d = data_batch_trg['pseudo_label_3d']
+                if 'pseudo_conf_2d' in data_batch_trg and data_batch_trg['pseudo_conf_2d'] is not None and \
+                   hasattr(cfg.TRAIN.XMUDA, 'PL_TO_UNK') and cfg.TRAIN.XMUDA.PL_TO_UNK.enable:
+                    # recompute low2d mask
+                    conf2d = data_batch_trg['pseudo_conf_2d']
+                    thr2d_cfg = getattr(cfg.TRAIN.XMUDA.PL_TO_UNK, 'thr2d', None)
+                    if thr2d_cfg is not None:
+                        thr2d = float(thr2d_cfg)
+                    elif cfg.TRAIN.XMUDA.PL_TO_UNK.thr is not None:
+                        thr2d = float(cfg.TRAIN.XMUDA.PL_TO_UNK.thr)
+                    else:
+                        q2d = getattr(cfg.TRAIN.XMUDA.PL_TO_UNK, 'q2d', None)
+                        if q2d is not None:
+                            thr2d = torch.quantile(conf2d.detach(), float(q2d))
+                        elif cfg.TRAIN.XMUDA.PL_TO_UNK.q is not None:
+                            thr2d = torch.quantile(conf2d.detach(), float(cfg.TRAIN.XMUDA.PL_TO_UNK.q))
+                        else:
+                            thr2d = torch.quantile(conf2d.detach(), 0.2)
+                    low2d = (conf2d < thr2d)
+                    ignore2d = (mask_unk & (~low2d))
+                    pl2d[ignore2d] = ignore
+                else:
+                    pl2d[mask_unk] = ignore
+                if 'pseudo_conf_3d' in data_batch_trg and data_batch_trg['pseudo_conf_3d'] is not None and \
+                   hasattr(cfg.TRAIN.XMUDA, 'PL_TO_UNK') and cfg.TRAIN.XMUDA.PL_TO_UNK.enable:
+                    conf3d = data_batch_trg['pseudo_conf_3d']
+                    thr3d_cfg = getattr(cfg.TRAIN.XMUDA.PL_TO_UNK, 'thr3d', None)
+                    if thr3d_cfg is not None:
+                        thr3d = float(thr3d_cfg)
+                    elif cfg.TRAIN.XMUDA.PL_TO_UNK.thr is not None:
+                        thr3d = float(cfg.TRAIN.XMUDA.PL_TO_UNK.thr)
+                    else:
+                        q3d = getattr(cfg.TRAIN.XMUDA.PL_TO_UNK, 'q3d', None)
+                        if q3d is not None:
+                            thr3d = torch.quantile(conf3d.detach(), float(q3d))
+                        elif cfg.TRAIN.XMUDA.PL_TO_UNK.q is not None:
+                            thr3d = torch.quantile(conf3d.detach(), float(cfg.TRAIN.XMUDA.PL_TO_UNK.q))
+                        else:
+                            thr3d = torch.quantile(conf3d.detach(), 0.2)
+                    low3d = (conf3d < thr3d)
+                    ignore3d = (mask_unk & (~low3d))
+                    pl3d[ignore3d] = ignore
+                else:
+                    pl3d[mask_unk] = ignore
 
             pl_loss_trg_2d = F.cross_entropy(preds_2d['seg_logit'], pl2d, ignore_index=ignore)
             pl_loss_trg_3d = F.cross_entropy(preds_3d['seg_logit'], pl3d, ignore_index=ignore)
@@ -452,16 +596,17 @@ def main():
     if output_dir:
         config_path = osp.splitext(args.config_file)[0]
         output_dir = output_dir.replace('@', config_path.replace('configs/', ''))
-        if osp.isdir(output_dir):
-            warnings.warn('Output directory exists.')
         os.makedirs(output_dir, exist_ok=True)
 
-    # run name
+    # run name & per-run subdir (keep all artifacts inside)
     timestamp = time.strftime('%m-%d_%H-%M-%S')
     hostname = socket.gethostname()
     run_name = '{:s}.{:s}'.format(timestamp, hostname)
+    run_dir = osp.join(output_dir, 'train.{:s}'.format(run_name)) if output_dir else ''
+    if run_dir:
+        os.makedirs(run_dir, exist_ok=True)
 
-    logger = setup_logger('xmuda', output_dir, comment='train.{:s}'.format(run_name))
+    logger = setup_logger('xmuda', run_dir or output_dir, comment='train.{:s}'.format(run_name))
     logger.info('{:d} GPUs available'.format(torch.cuda.device_count()))
     logger.info(args)
 
@@ -473,7 +618,7 @@ def main():
     # check if there is at least one loss on target set
     assert cfg.TRAIN.XMUDA.lambda_xm_src > 0 or cfg.TRAIN.XMUDA.lambda_xm_trg > 0 or cfg.TRAIN.XMUDA.lambda_pl > 0 or \
            cfg.TRAIN.XMUDA.lambda_minent > 0
-    train(cfg, output_dir, run_name)
+    train(cfg, run_dir or output_dir, run_name)
 
 
 if __name__ == '__main__':
