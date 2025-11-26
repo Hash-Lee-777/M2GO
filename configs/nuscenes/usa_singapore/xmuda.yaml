@@ -45,16 +45,16 @@ TRAIN:
   CLASS_WEIGHTS: [2.50, 4.23, 5.67, 3.82, 1.00, 1.00]
   XMUDA:
     lambda_xm_src: 1.0
-    lambda_xm_trg: 0.05
+    lambda_xm_trg: 0.1
     # Enable pseudo-label training with head-expansion logic
-    lambda_pl: 0.05     # use PL on known candidates; small weight
+    lambda_pl: 0.1     # use PL on known candidates; small weight
     # Map low-confidence PL to Unknown (C+1) to supervise Unknown head
     # per-modality override supported: q2d/q3d or thr2d/thr3d
-    PL_TO_UNK: {enable: true, thr: null, q: 0.05, q2d: null, q3d: null, thr3d: null}
+    PL_TO_UNK: {enable: true, thr: null, q: null, q2d: 0.03, q3d: 0.03, thr3d: null}
 
 OPENSET:
   ENABLE: true                       
-  UNKNOWN_CLASSES: ["bus", "construction_vehicle"]  
+  UNKNOWN_CLASSES: ["bus", "trailer"]  
   UNK_SCORE: {alpha: 1.0, beta: 1.0, gamma: 1.2}    
   THRESHOLD: {type: quantile, q: 0.99}       
   GATE_XM: true # Module A's on-off                            
@@ -62,15 +62,15 @@ OPENSET:
   GATE_MINENT: false                         
   WARMUP_ITERS: 10000                          
   LOG_HIST_EVERY: 500                         
-  LAMBDA_UNK: 0.01 # small positive to reinforce Unknown head
+  LAMBDA_UNK: 0.00 # small positive to reinforce Unknown head
   UNK_RAMP_ITERS: 5000 # linear ramp steps after warmup; 0 = disabled
 
 VAL:
   BATCH_SIZE: 32
   PERIOD: 5000
-  SAVE_VIZ: false      # save 2D overlay + p_unknown heat every VIZ_EVERY batches
-  VIZ_EVERY: 10       # save frequency (batches)
-  VIZ_MAX: 50         # optional cap (used internally)
+  SAVE_VIZ: false     # save 2D overlay + p_unknown heat every VIZ_EVERY batches
+  VIZ_EVERY: 2       
+  VIZ_MAX: 200        
 
 RESUME_PATH: ""
 AUTO_RESUME: False

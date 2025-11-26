@@ -10,6 +10,15 @@ import torch.nn.functional as F
 from xmuda.data.utils.evaluate import Evaluator
 from xmuda.data.utils.visualize import draw_points_image_labels, draw_points_image_depth
 
+# Optional sklearn metrics for AUROC/AUPR (fallback to numpy implementation if unavailable)
+try:
+    from sklearn.metrics import roc_auc_score, average_precision_score
+    _SKLEARN_METRICS = True
+except Exception:
+    roc_auc_score = None
+    average_precision_score = None
+    _SKLEARN_METRICS = False
+
 
 def validate(cfg,
              model_2d,
@@ -63,6 +72,11 @@ def validate(cfg,
         # Head-expansion unknown threshold (fixed)
         head_unknown_thr = 0.2
 
+        # Buffers for threshold-free detection metrics (AUROC/AUPR)
+        det_y_true_2d, det_y_score_2d = [], []
+        det_y_true_3d, det_y_score_3d = [], []
+        det_y_true_f , det_y_score_f  = [], []
+
 
     pselab_data_list = []
     # diagnostics for head-expansion unknown prediction
@@ -102,7 +116,6 @@ def validate(cfg,
 
             # Head-expansion evaluation: use C+1 head predictions for Unknown
             # We keep probabilities for ensemble, but Unknown decision comes from argmax of 6-way heads
-
 
             # get original point cloud from before voxelization
             seg_label = data_batch['orig_seg_label']
@@ -147,6 +160,7 @@ def validate(cfg,
 
                     if y6 is not None:
                         # Head-expansion prediction: Unknown if p_unknown > thr; else choose best among first 5
+            
                         # 2D
                         p_unk_2d = probs_2d[left_idx:right_idx, -1].detach().cpu().numpy()
                         base5_2d = pred_label_voxel_2d_5[left_idx:right_idx].copy()
@@ -171,6 +185,16 @@ def validate(cfg,
                             yhat6_f[p_unk_f > head_unknown_thr] = 5
                         else:
                             yhat6_f = None
+
+                        # accumulate detection labels/scores for AUROC/AUPR (positive = Unknown)
+                        y_true_slice = (y6 == 5)
+                        det_y_true_2d.append(y_true_slice.astype('uint8'))
+                        det_y_score_2d.append(p_unk_2d.astype('float32'))
+                        if model_3d:
+                            det_y_true_3d.append(y_true_slice.astype('uint8'))
+                            det_y_score_3d.append(p_unk_3d.astype('float32'))
+                            det_y_true_f.append(y_true_slice.astype('uint8'))
+                            det_y_score_f.append(p_unk_f.astype('float32'))
 
                         # accumulate 6 classes intersection and union
                         for m, yhat6 in [('2d', yhat6_2d), ('3d', yhat6_3d), ('fused', yhat6_f)]:
@@ -397,3 +421,69 @@ def validate(cfg,
                     100.0*diag_arg2d_unk/diag_tot,
                     100.0*(diag_arg3d_unk/diag_tot if model_3d else 0.0),
                     100.0*(diag_argf_unk/diag_tot if model_3d else 0.0)))
+
+            # Threshold-free detection metrics (AUROC/AUPR)
+            def _auc_trapezoid(x, y):
+                return float(np.trapz(y, x)) if len(x) > 1 else 0.0
+
+            def _roc_auc(y_true, y_score):
+                y_true = np.asarray(y_true, dtype=np.uint8)
+                y_score = np.asarray(y_score, dtype=np.float32)
+                if y_true.size == 0:
+                    return 0.0
+                order = np.argsort(-y_score)
+                y_true = y_true[order]
+                tp = np.cumsum(y_true)
+                fp = np.cumsum(1 - y_true)
+                P = float(tp[-1]) if tp.size else 0.0
+                N = float(fp[-1]) if fp.size else 0.0
+                if P == 0.0 or N == 0.0:
+                    return 0.0
+                tpr = tp / P
+                fpr = fp / N
+                fpr = np.concatenate([[0.0], fpr, [1.0]])
+                tpr = np.concatenate([[0.0], tpr, [1.0]])
+                return _auc_trapezoid(fpr, tpr)
+
+            def _pr_auc(y_true, y_score):
+                y_true = np.asarray(y_true, dtype=np.uint8)
+                y_score = np.asarray(y_score, dtype=np.float32)
+                if y_true.size == 0:
+                    return 0.0
+                order = np.argsort(-y_score)
+                y_true = y_true[order]
+                tp = np.cumsum(y_true)
+                fp = np.cumsum(1 - y_true)
+                P = float(tp[-1]) if tp.size else 0.0
+                if P == 0.0:
+                    return 0.0
+                recall = tp / P
+                precision = tp / np.maximum(tp + fp, 1e-8)
+                recall = np.concatenate([[0.0], recall])
+                precision = np.concatenate([[1.0], precision])
+                return _auc_trapezoid(recall, precision)
+
+            def _compute_and_log(tag, ys, ss):
+                if len(ys) == 0 or len(ss) == 0:
+                    return
+                y = np.concatenate(ys)
+                s = np.concatenate(ss)
+                # Prefer sklearn (robust & battle-tested); fallback to numpy implementation
+                if _SKLEARN_METRICS:
+                    try:
+                        auroc = float(roc_auc_score(y, s))
+                    except Exception:
+                        auroc = _roc_auc(y, s)
+                    try:
+                        aupr = float(average_precision_score(y, s))
+                    except Exception:
+                        aupr = _pr_auc(y, s)
+                else:
+                    auroc = _roc_auc(y, s)
+                    aupr  = _pr_auc(y, s)
+                logger.info('[OpenSet-Det-{}] AUROC={:.2f}  AUPR={:.2f}'.format(tag, 100.0*auroc, 100.0*aupr))
+
+            _compute_and_log('2D', det_y_true_2d, det_y_score_2d)
+            if model_3d:
+                _compute_and_log('3D', det_y_true_3d, det_y_score_3d)
+                _compute_and_log('2D+3D', det_y_true_f, det_y_score_f)
