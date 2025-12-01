@@ -18,6 +18,8 @@ _C.TRAIN.CLASS_WEIGHTS = []
 _C.VAL.SAVE_VIZ = False
 _C.VAL.VIZ_EVERY = 10
 _C.VAL.VIZ_MAX = 50
+_C.VAL.HEAD_UNKNOWN_THR_2D = 0.2
+_C.VAL.HEAD_UNKNOWN_THR_3D = 0.05
 
 # ---------------------------------------------------------------------------- #
 # xMUDA options

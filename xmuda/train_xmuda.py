@@ -332,9 +332,29 @@ def train(cfg, output_dir='', run_name=''):
                 lambda_unk_eff = 0.0
 
             if lambda_unk_eff > 0.0:
+
+                # ---------------- [Start of Modification] ----------------
+                # 策略：Asymmetric Cross-Modal Supervision (2D Guided 3D)
+                # 逻辑：只有 2D 也高熵困惑的点，才让 3D 学 Unknown            
+                with torch.no_grad():
+
+                    # Step 1: 计算 2D 熵的 q=0.8 分位数（即高熵阈值）
+                    thr_2d_guide = torch.quantile(H2D.detach(), 0.97)
+
+                    # Step 2: 计算更严格的 3D unknown mask
+                    mask_unk_3d_guided = mask_unk & (H2D.detach() > thr_2d_guide)
+
+                # Step 3: 计算 Unknown CE Loss
+                # 2D 保持原逻辑
                 unk_ce_2d = unknown_ce_loss(preds_2d['seg_logit'], mask_unk, unknown_id_2d)
-                unk_ce_3d = unknown_ce_loss(preds_3d['seg_logit'], mask_unk, unknown_id_3d)
-                train_metric_logger.update(unk_ce_2d=unk_ce_2d, unk_ce_3d=unk_ce_3d, lambda_unk=lambda_unk_eff)
+
+                # 3D 使用严格 mask
+                unk_ce_3d = unknown_ce_loss(preds_3d['seg_logit'], mask_unk_3d_guided, unknown_id_3d)
+
+                train_metric_logger.update(unk_ce_2d=unk_ce_2d,
+                                        unk_ce_3d=unk_ce_3d,
+                                        lambda_unk=lambda_unk_eff)
+
                 loss_2d.append(lambda_unk_eff * unk_ce_2d)
                 loss_3d.append(lambda_unk_eff * unk_ce_3d)
 

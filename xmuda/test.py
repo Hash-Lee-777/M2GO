@@ -56,21 +56,23 @@ def test(cfg, args, output_dir=''):
     # build checkpointer
     checkpointer_2d = CheckpointerV2(model_2d, save_dir=output_dir, logger=logger)
     if args.ckpt2d:
-        # load weight if specified
-        weight_path = args.ckpt2d.replace('@', output_dir)
+        weight_path = args.ckpt2d
+        # 如果是绝对路径，直接用；如果是相对路径再拼接 output_dir
+        if not osp.isabs(weight_path):
+            weight_path = osp.join(output_dir, weight_path)
         checkpointer_2d.load(weight_path, resume=False)
     else:
-        # load last checkpoint
         checkpointer_2d.load(None, resume=True)
+
     checkpointer_3d = CheckpointerV2(model_3d, save_dir=output_dir, logger=logger)
     if args.ckpt3d:
-        # load weight if specified
-        weight_path = args.ckpt3d.replace('@', output_dir)
+        weight_path = args.ckpt3d
+        if not osp.isabs(weight_path):
+            weight_path = osp.join(output_dir, weight_path)
         checkpointer_3d.load(weight_path, resume=False)
     else:
-        # load last checkpoint
         checkpointer_3d.load(None, resume=True)
-
+    
     # build dataset
     test_dataloader = build_dataloader(cfg, mode='test', domain='target')
 

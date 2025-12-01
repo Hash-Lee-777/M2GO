@@ -109,6 +109,8 @@ You can run the training with
 ```
 $ cd <root dir of this repo>
 $ python xmuda/train_xmuda.py --cfg=configs/nuscenes/usa_singapore/xmuda.yaml
+//PYTHONPATH=$(pwd) python xmuda/train_xmuda.py --cfg=configs/nuscenes/usa_singapore/xmuda_real.yaml
+
 ```
 
 The output will be written to `/home/<user>/workspace/outputs/xmuda/<config_path>` by 
@@ -123,7 +125,7 @@ $ python xmuda/train_xmuda.py --cfg=configs/nuscenes/usa_singapore/xmuda.yaml OU
 You can start the trainings on the other UDA scenarios (Day/Night and A2D2/SemanticKITTI) analogously:
 ```
 $ python xmuda/train_xmuda.py --cfg=configs/nuscenes/day_night/xmuda.yaml
-$ python xmuda/train_xmuda.py --cfg=configs/a2d2_semantic_kitti/xmuda.yaml
+$ PYTHONPATH=$(pwd) python xmuda/train_xmuda.py --cfg=configs/a2d2_semantic_kitti/xmuda.yaml
 ```
 
 ### xMUDA<sub>PL</sub>
@@ -169,6 +171,8 @@ by the output directory for that config file. For example:
 ```
 $ cd <root dir of this repo>
 $ python xmuda/test.py --cfg=configs/nuscenes/usa_singapore/xmuda.yaml @/model_2d_0100000.pth @/model_3d_100000.pth
+
+PYTHONPATH=$(pwd)  python xmuda/test.py     --cfg=configs/nuscenes/usa_singapore/xmuda.yaml     --pselab     /work/sdim-lemons/jjch/3D_Openset_UDA_dev/output/nuscenes/usa_singapore/xmuda/train.11-29_17-38-57.sustech-SYS-4029GP-TRT2/model_2d_100000.pth     /work/sdim-lemons/jjch/3D_Openset_UDA_dev/output/nuscenes/usa_singapore/xmuda/train.11-29_17-38-57.sustech-SYS-4029GP-TRT2/model_3d_100000.pth
 ```
 You can also provide an absolute path without `@`. 
 

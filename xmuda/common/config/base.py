@@ -105,6 +105,8 @@ _C.VAL.LOG_PERIOD = 20
 # The metric for best validation performance
 _C.VAL.METRIC = ''
 
+_C.VAL.SGR_ENABLED = False
+
 # ---------------------------------------------------------------------------- #
 # Misc options
 # ---------------------------------------------------------------------------- #

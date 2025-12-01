@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from xmuda.data.utils.evaluate import Evaluator
 from xmuda.data.utils.visualize import draw_points_image_labels, draw_points_image_depth
+from xmuda.data.utils.refinement import apply_geometric_refinement
 
 # Optional sklearn metrics for AUROC/AUPR (fallback to numpy implementation if unavailable)
 try:
@@ -70,7 +71,8 @@ def validate(cfg,
             return (2 * a * b) / (a + b + eps)
 
         # Head-expansion unknown threshold (fixed)
-        head_unknown_thr = 0.2
+        head_unknown_thr_2d = getattr(cfg.VAL, 'HEAD_UNKNOWN_THR_2D', 0.2)
+        head_unknown_thr_3d = getattr(cfg.VAL, 'HEAD_UNKNOWN_THR_3D', 0.05)
 
         # Buffers for threshold-free detection metrics (AUROC/AUPR)
         det_y_true_2d, det_y_score_2d = [], []
@@ -165,14 +167,14 @@ def validate(cfg,
                         p_unk_2d = probs_2d[left_idx:right_idx, -1].detach().cpu().numpy()
                         base5_2d = pred_label_voxel_2d_5[left_idx:right_idx].copy()
                         yhat6_2d = base5_2d
-                        yhat6_2d[p_unk_2d > head_unknown_thr] = 5
+                        yhat6_2d[p_unk_2d > head_unknown_thr_2d] = 5
 
                         # 3D (if available)
                         if model_3d:
                             p_unk_3d = probs_3d[left_idx:right_idx, -1].detach().cpu().numpy()
                             base5_3d = pred_label_voxel_3d_5[left_idx:right_idx].copy()
                             yhat6_3d = base5_3d
-                            yhat6_3d[p_unk_3d > head_unknown_thr] = 5
+                            yhat6_3d[p_unk_3d > head_unknown_thr_3d] = 5
                         else:
                             yhat6_3d = None
 
@@ -182,9 +184,44 @@ def validate(cfg,
                             p_unk_f = pro_f[:, -1].detach().cpu().numpy()
                             base5_f = pred_label_voxel_ensemble_5[left_idx:right_idx].copy()
                             yhat6_f = base5_f
-                            yhat6_f[p_unk_f > head_unknown_thr] = 5
+                            yhat6_f[p_unk_f > head_unknown_thr_3d] = 5
                         else:
                             yhat6_f = None
+                            
+                        print(data_batch['xyz'])
+                        # =========================================================
+                        # [Start] Module B: Spatio-Geometric Refinement (SGR)
+                        # =========================================================
+                        # 仅当 Config 开启 SGR 且数据中包含原始 xyz 时执行
+                        if getattr(cfg.VAL, 'SGR_ENABLED', False) and 'xyz' in data_batch and pts_mask is not None:
+                            # 提取当前 Slice 的真实物理坐标
+                            # data_batch['xyz'] 通常是 list，每个元素是 (N_full, 3)
+                            # 我们需要根据 pts_mask 提取进入网络的那些点 (N_active, 3)
+                            raw_xyz = data_batch['xyz'][batch_ind] # numpy array
+                            curr_xyz = raw_xyz[pts_mask]
+                            
+                            # SGR 超参数 (建议后续移入 Config)
+                            sgr_params = {
+                                'unknown_id': 5,
+                                'knn_k': 10,             # Micro-level: smoothing
+                                'cluster_eps': 0.6,      # Macro-level: clustering radius
+                                'min_cluster_size': 30,  # Macro-level: noise filtering
+                                'fallback_class_id': 0   # Noise -> Background (Class 0)
+                            }
+                            
+                            # Refine 2D
+                            yhat6_2d = apply_geometric_refinement(curr_xyz, yhat6_2d, **sgr_params)
+                            
+                            # Refine 3D
+                            if yhat6_3d is not None:
+                                yhat6_3d = apply_geometric_refinement(curr_xyz, yhat6_3d, **sgr_params)
+                                
+                            # Refine Fused (Most Important)
+                            if yhat6_f is not None:
+                                yhat6_f = apply_geometric_refinement(curr_xyz, yhat6_f, **sgr_params)
+                        # =========================================================
+                        # [End] Module B
+                        # =========================================================
 
                         # accumulate detection labels/scores for AUROC/AUPR (positive = Unknown)
                         y_true_slice = (y6 == 5)
@@ -215,10 +252,10 @@ def validate(cfg,
 
                         # diagnostics aggregation
                         diag_tot += int(len(pred_ref))
-                        diag_pu2d_over += int((p_unk_2d > head_unknown_thr).sum())
+                        diag_pu2d_over += int((p_unk_2d > head_unknown_thr_2d).sum())
                         if model_3d:
-                            diag_pu3d_over += int((p_unk_3d > head_unknown_thr).sum())
-                            diag_puf_over  += int((p_unk_f > head_unknown_thr).sum())
+                            diag_pu3d_over += int((p_unk_3d > head_unknown_thr_3d).sum())
+                            diag_puf_over  += int((p_unk_f > head_unknown_thr_3d).sum())
                         diag_arg2d_unk += int((yhat6_2d == 5).sum())
                         if yhat6_3d is not None:
                             diag_arg3d_unk += int((yhat6_3d == 5).sum())
