@@ -1,0 +1,66 @@
+MODEL_2D:
+  TYPE: "UNetResNet34"
+  DUAL_HEAD: True
+  NUM_CLASSES: 6
+MODEL_3D:
+  TYPE: "SCN"
+  DUAL_HEAD: True
+  NUM_CLASSES: 6
+DATASET_SOURCE:
+  TYPE: "NuScenesSCN"
+  TRAIN: ("train_day",)
+  NuScenesSCN:
+    preprocess_dir: "/work/sdim-lemons/jjch/3D_Openset_UDA/data/nuscenes_preprocess/preprocess"
+    nuscenes_dir: "/work/sdim-lemons/jjch/3D_Openset_UDA_dev/data/NuScenes"  # only front cam images are needed
+DATASET_TARGET:
+  TYPE: "NuScenesSCN"
+  TRAIN: ("train_night",)
+  VAL: ("val_night",)
+  TEST: ("test_night",)
+  NuScenesSCN:
+    preprocess_dir: "/work/sdim-lemons/jjch/3D_Openset_UDA/data/nuscenes_preprocess/preprocess"
+    nuscenes_dir: "/work/sdim-lemons/jjch/3D_Openset_UDA_dev/data/NuScenes"  # only front cam images are needed
+DATALOADER:
+  NUM_WORKERS: 4
+OPTIMIZER:
+  TYPE: "Adam"
+  BASE_LR: 0.001
+SCHEDULER:
+  TYPE: "MultiStepLR"
+  MultiStepLR:
+    gamma: 0.1
+    milestones: (80000, 90000)
+  MAX_ITERATION: 100000
+TRAIN:
+  BATCH_SIZE: 8
+  SUMMARY_PERIOD: 50
+  CHECKPOINT_PERIOD: 5000
+  CLASS_WEIGHTS: [2.68678412, 4.36182969, 5.47896839, 3.89026883, 1., 1.0]
+  XMUDA:
+    lambda_xm_src: 1.0
+    lambda_xm_trg: 0.1
+    lambda_pl: 0.0
+    PL_TO_UNK: {enable: false, thr: null, q: null, q2d: 0.05, q3d: 0.07, thr2d: null, thr3d: null}
+OPENSET:
+  ENABLE: true
+  UNKNOWN_CLASSES: ["truck"]
+  UNK_SCORE: {alpha: 1.0, beta: 1.0, gamma: 1.2}
+  THRESHOLD: {type: quantile, q: 0.99}
+  GATE_XM: false
+  GATE_PL: false
+  GATE_MINENT: false
+  WARMUP_ITERS: 10000
+  LOG_HIST_EVERY: 500
+  LAMBDA_UNK: 0.005
+  UNK_RAMP_ITERS: 5000
+VAL:
+  BATCH_SIZE: 32
+  PERIOD: 5000
+  SAVE_VIZ: false
+  VIZ_EVERY: 2
+  VIZ_MAX: 200
+  HEAD_UNKNOWN_THR_2D: 0.15
+  HEAD_UNKNOWN_THR_3D: 0.05
+  SGR_ENABLED: false
+
+OUTPUT_DIR: "/work/sdim-lemons/jjch/3D_Openset_UDA_dev/m2go/output/@"

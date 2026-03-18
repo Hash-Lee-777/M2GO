@@ -1,13 +1,25 @@
 # compilation and distribution
-__pycache__
+__pycache__/
 SparseConvNet/
-/data/
+
+# ignore all data folders anywhere
+data/
+**/data/
+
+# outputs
 output/
-teaser.png
-# Pycharm editor settings
+
+# files
+*.png
+*.pth
+*.pt
+*.npy
+
+# PyCharm / VSCode
 .idea
 .vscode/
+
+# misc
 analysis/
 BUS/
-OpenSet_HeadExpansion_Summary.md
 viz/
