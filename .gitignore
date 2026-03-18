@@ -4,10 +4,11 @@ SparseConvNet/
 
 # ignore all data folders anywhere
 data/
-**/data/
 
 # outputs
 output/
+day_night/
+traintxt/
 
 # files
 *.png
