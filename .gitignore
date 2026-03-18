@@ -2,8 +2,8 @@
 __pycache__/
 SparseConvNet/
 
-# ignore all data folders anywhere
-data/
+# ignore repo-root dataset folder (often a symlink)
+/data/
 
 # outputs
 output/
