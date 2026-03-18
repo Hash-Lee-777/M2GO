@@ -203,4 +203,4 @@ _C.COSMIX.ALPHA_CLAMP = (0.05, 0.95)
 # Misc options
 # ---------------------------------------------------------------------------- #
 # @ will be replaced by config path
-_C.OUTPUT_DIR = osp.expanduser('~/workspace/outputs/xmuda/@')
+_C.OUTPUT_DIR = osp.expanduser('~/workspace/outputs/M2GO/@')

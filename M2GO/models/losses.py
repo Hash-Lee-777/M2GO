@@ -54,7 +54,7 @@ def logcoral_loss(x_src, x_trg):
     cov_trg = torch.where(torch.full_like(cov_trg, condition, dtype=torch.uint8), torch.eye(cov_trg.shape[0], device=cov_trg.device), cov_trg)
 
     if condition:
-        logger = logging.getLogger('xmuda.train')
+        logger = logging.getLogger('M2GO.train')
         logger.info('Big number > 1e30 or nan in covariance matrix, return loss of 0 to prevent error in SVD decomposition.')
 
     _, e_src, v_src = cov_src.svd()

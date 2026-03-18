@@ -20,7 +20,7 @@ from M2GO.data.utils.validate import validate
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='xMUDA test')
+    parser = argparse.ArgumentParser(description='M2GO test')
     parser.add_argument(
         '--cfg',
         dest='config_file',
@@ -43,7 +43,7 @@ def parse_args():
 
 
 def test(cfg, args, output_dir=''):
-    logger = logging.getLogger('xmuda.test')
+    logger = logging.getLogger('M2GO.test')
 
     # build 2d model
     model_2d = build_model_2d(cfg)[0]
@@ -125,7 +125,7 @@ def main():
     if run_dir and not osp.isdir(run_dir):
         os.makedirs(run_dir)
 
-    logger = setup_logger('xmuda', run_dir or output_dir, comment='test.{:s}'.format(run_name))
+    logger = setup_logger('M2GO', run_dir or output_dir, comment='test.{:s}'.format(run_name))
     logger.info('{:d} GPUs available'.format(torch.cuda.device_count()))
     logger.info(args)
 

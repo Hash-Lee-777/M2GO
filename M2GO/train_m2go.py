@@ -59,7 +59,7 @@ def train(cfg, output_dir='', run_name=''):
     # ---------------------------------------------------------------------------- #
     # Build models, optimizer, scheduler, checkpointer, etc.
     # ---------------------------------------------------------------------------- #
-    logger = logging.getLogger('xmuda.train')
+    logger = logging.getLogger('M2GO.train')
 
     set_random_seed(cfg.RNG_SEED)
 
@@ -727,7 +727,7 @@ def main():
     if run_dir:
         os.makedirs(run_dir, exist_ok=True)
 
-    logger = setup_logger('xmuda', run_dir or output_dir, comment='train.{:s}'.format(run_name))
+    logger = setup_logger('M2GO', run_dir or output_dir, comment='train.{:s}'.format(run_name))
     logger.info('{:d} GPUs available'.format(torch.cuda.device_count()))
     logger.info(args)
 
